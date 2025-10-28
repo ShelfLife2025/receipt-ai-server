@@ -1,14 +1,16 @@
 # main.py
 # FastAPI receipt parser with noise filtering, canonicalization, and deduplication.
 
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, Query
+from fastapi.responses import JSONResponse, Response
 from typing import List, Tuple, Optional, Dict
 from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 import io
 import re
 from difflib import get_close_matches
+import urllib.parse  # for safe URL encoding
+import httpx
 
 app = FastAPI()
 
@@ -96,62 +98,45 @@ NOISE_PATTERNS = [
     r"\bdebit\b", r"\bcredit\b", r"\bvisa\b", r"\bmastercard\b", r"\bdiscover\b", r"\bamex\b",
     r"\bthank you\b|\bthanks\b", r"\bcashier\b|\bmanager\b|\bstore\b\s*#",
     r"\bpresto!?$", r"\bpresto!\b", r"\bplaza\b|\bmall\b|\bmillenia\b",
-    r"https?://", r"\bwww\.", r"@[A-Za-z0-9_]+",                         # urls/handles
-    r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",                                # phone numbers
-    r"\b\d{1,4}\s+[A-Za-z0-9]+\s+(ave|avenue|st|street|rd|road|blvd|drive|dr)\b",  # addresses
+    r"https?://", r"\bwww\.", r"@[A-Za-z0-9_]+",
+    r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
+    r"\b\d{1,4}\s+[A-Za-z0-9]+\s+(ave|avenue|st|street|rd|road|blvd|drive|dr)\b",
     r"\btrace\s*#?:?\s*\d+\b", r"\bacct\s*#?:?\s*\w+\b",
     r"\bcontactless\b|\btap\b|\bchip\b", r"\bmerchant\b|\bterminal\b|\bpos\b",
-    r"\bgrocery\s?item\b$"  # fallback junk label we sometimes produce
+    r"\bgrocery\s?item\b$"
 ]
 
 # ===================== Helpers =====================
 
 def is_noise_line(text: str) -> bool:
-    """Filter out obvious non-item lines before any normalization."""
     t = (text or "").strip().lower()
     if not t or len(t) < 3:
         return True
-
-    # Reject if matches any explicit noise pattern
     for pat in NOISE_PATTERNS:
         if re.search(pat, t):
             return True
-
-    # Too few letters → likely code/blank/noise
     letters = sum(c.isalpha() for c in t)
     if letters < 2:
         return True
-
     return False
 
 def normalize(text: str) -> str:
-    """Lowercase, remove brands/sizes/codes, expand tokens, collapse spaces."""
     t = (text or "").lower()
     t = t.replace("&", " and ")
-
-    # remove brand words (whole-word)
     for bw in BRAND_WORDS:
         t = re.sub(rf"\b{re.escape(bw)}\b", " ", t, flags=re.IGNORECASE)
-
-    # remove sizes (8 oz, 2pk, etc.)
     t = SIZE_REGEX.sub(" ", t)
-
-    # remove long numeric/code-ish chunks
     t = CODEY_REGEX.sub(" ", t)
-
-    # expand common tokens and rebuild
     words: List[str] = []
     for w in re.split(r"[^a-z0-9]+", t):
         if not w:
             continue
         words.append(TOKEN_MAP.get(w, w))
-
     t = " ".join(words)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
 def extract_qty(text: str) -> Tuple[str, int]:
-    """Extract and remove a quantity if present. Defaults to 1."""
     qty = 1
     def repl(m):
         nonlocal qty
@@ -170,28 +155,21 @@ def _tokens(s: str) -> List[str]:
     return [w for w in re.split(r"[^a-z0-9]+", s.lower()) if w]
 
 def tokens_have_hint(tokens: List[str]) -> bool:
-    """Require at least one FOOD or HOUSEHOLD hint to consider it an item."""
     if not tokens:
         return False
     joined = " ".join(tokens)
-    # Household?
     for h in HOUSEHOLD_HINTS:
         if h in joined:
             return True
-    # Food?
     for f in FOOD_HINTS:
         if f in joined:
             return True
-    # Light fallback: if it ends with a common food-y plural/singular noun pattern
-    # like 'crackers', 'tomatoes', 'apples', 'chicken', 'bread'
-    # (but avoid super-short 1-2 char tokens)
     last = tokens[-1]
     if len(last) >= 4 and (last.endswith("s") or last in {"bread","chicken","beef","pork","fish"}):
         return True
     return False
 
 def looks_like_item(cleaned: str) -> bool:
-    """Heuristic to decide if the cleaned line is an actual product."""
     t = cleaned.strip().lower()
     if not t:
         return False
@@ -200,13 +178,11 @@ def looks_like_item(cleaned: str) -> bool:
     toks = _tokens(t)
     if not tokens_have_hint(toks):
         return False
-    # Avoid still-codey strings
     if re.fullmatch(r"[a-z]{0,2}\d{4,}", t):
         return False
     return True
 
 def categorize_item(name: str) -> str:
-    """Very simple Food/Household split."""
     t = name.lower()
     for h in HOUSEHOLD_HINTS:
         if h in t:
@@ -214,12 +190,7 @@ def categorize_item(name: str) -> str:
     return "Food"
 
 def canonical_name(name: str) -> str:
-    """
-    Map common abbreviations to a friendly display. Lightweight so it generalizes.
-    """
     t = name.lower()
-
-    # Common grocery names
     if "parmesan" in t and "cheese" in t:
         return "Parmesan cheese"
     if "mozzarella" in t and "cheese" in t:
@@ -242,8 +213,6 @@ def canonical_name(name: str) -> str:
         return "Tomatoes"
     if "garlic" in t:
         return "Garlic"
-
-    # Household simplifications
     if "detergent" in t and "pod" in t:
         return "Laundry pods"
     if "detergent" in t:
@@ -256,14 +225,18 @@ def canonical_name(name: str) -> str:
         return "Toilet paper"
     if "wipe" in t:
         return "Wipes"
-
-    # Fallback: Title-case cleaned string
     return t[:1].upper() + t[1:]
 
+# create a deterministic image URL for this item name
+def guess_image_url(display_name: str) -> str:
+    """
+    This returns the same URL that the iOS app will later try to show directly
+    as an image. It's pointing at our /image route.
+    """
+    encoded = urllib.parse.quote(display_name.strip())
+    return f"https://receipt-ai-server.onrender.com/image?name={encoded}"
+
 def parse_line(raw: str) -> Optional[Tuple[str, int, str]]:
-    """
-    Return (display_name, qty, category) for one OCR line, or None if not a grocery item.
-    """
     if is_noise_line(raw):
         return None
 
@@ -274,7 +247,6 @@ def parse_line(raw: str) -> Optional[Tuple[str, int, str]]:
     if not looks_like_item(s):
         return None
 
-    # Last sanity filters: drop obvious stray fragments
     bad_fragments = {"payment", "entry", "method", "apply", "trace", "you", "saved", "presto"}
     if any(frag in s.split() for frag in bad_fragments):
         return None
@@ -295,10 +267,9 @@ async def parse_receipt(file: UploadFile = File(...)):
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
     image = ImageOps.autocontrast(image)
-    image = Image.filter(ImageFilter.SHARPEN) if hasattr(Image, "filter") else image
+    image = image.filter(ImageFilter.SHARPEN) if hasattr(Image, "filter") else image
 
     # 2) OCR
-    # psm 6 = assume a single uniform block of text; good default for receipts
     text = pytesseract.image_to_string(image, config="--psm 6")
 
     # 3) Split lines and parse
@@ -313,15 +284,79 @@ async def parse_receipt(file: UploadFile = File(...)):
 
         name, qty, category = parsed
         key = name.lower()
+
         if key in items:
+            # already saw this item -> bump qty
             items[key]["quantity"] = int(items[key]["quantity"]) + qty
         else:
+            # first time we see this item
             items[key] = {
                 "name": name,
                 "quantity": qty,
                 "category": category,
+                # include a stable image_url guess for UI
+                "image_url": guess_image_url(name),
             }
 
     # 4) Return grouped items as a list
     return JSONResponse(list(items.values()))
 
+# ===================== IMAGE ROUTE =====================
+
+_IMAGE_CACHE: Dict[str, bytes] = {}
+
+# Map canonical product names to nice-looking stock images
+PRODUCT_IMAGE_MAP = {
+    "parmesan cheese": "https://images.unsplash.com/photo-1589301760014-d929f3979dbc?w=512&q=80",
+    "bread": "https://images.unsplash.com/photo-1608198093002-de0e3580bb67?w=512&q=80",
+    "yogurt": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?w=512&q=80",
+    "garlic": "https://images.unsplash.com/photo-1506806732259-39c2d0268443?w=512&q=80",
+    "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
+    "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
+    "panera mac & cheese": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
+    "mozzarella cheese": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
+    "cheddar cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
+    "crackers": "https://images.unsplash.com/photo-1603048297340-5e05ad3e3b80?w=512&q=80",
+    "paper towels": "https://images.unsplash.com/photo-1581579186981-5f3f0c612e75?w=512&q=80",
+    "toilet paper": "https://images.unsplash.com/photo-1584559582151-fb1dfa8b33a5?w=512&q=80",
+    "laundry detergent": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
+    "laundry pods": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
+    "water": "https://images.unsplash.com/photo-1561043433-aaf687c4cf4e?w=512&q=80",
+    "rao marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
+    "cream cheese": "https://images.unsplash.com/photo-1589301763197-9713a1e1e5c0?w=512&q=80",
+    "bagels": "https://images.unsplash.com/photo-1509440159596-0249088772ff?w=512&q=80",
+    "grapes": "https://images.unsplash.com/photo-1601004890211-3f3d02dd3c10?w=512&q=80",
+}
+
+FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
+
+def _canonical_lookup_key(raw_name: str) -> str:
+    return canonical_name(raw_name).strip().lower()
+
+@app.get("/image")
+async def get_product_image(name: str = Query(..., description="product name to fetch image for")):
+    """
+    Returns actual image bytes (JPEG/PNG) for a given item name.
+    iOS calls this URL directly and treats it like an image URL.
+    """
+    key = _canonical_lookup_key(name)
+    img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
+
+    # cache hit
+    if key in _IMAGE_CACHE:
+        return Response(content=_IMAGE_CACHE[key], media_type="image/jpeg")
+
+    # fetch from upstream CDN
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(img_url)
+        if r.status_code != 200:
+            # if something goes wrong pulling from CDN, send 1x1 empty JPEG-ish response
+            return Response(status_code=502)
+
+        data = r.content
+
+    # store in memory for next time
+    _IMAGE_CACHE[key] = data
+
+    # send image bytes back to the app
+    return Response(content=data, media_type="image/jpeg")
