@@ -5,18 +5,20 @@ from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import JSONResponse, Response
 from typing import List, Tuple, Optional, Dict
 from PIL import Image, ImageOps, ImageFilter
-import pytesseract
 import io
 import re
-from difflib import get_close_matches
 import urllib.parse  # for safe URL encoding
 import httpx
+import os
+
+# Tell Google client libraries where to find your service account credentials.
+# key.json must exist in the same folder as this file on the server.
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "key.json"
 
 app = FastAPI()
 
 # ===================== Canonicalization / Dictionaries =====================
 
-# Common store/brand words we want to strip if they appear in line items.
 BRAND_WORDS = {
     "publix","kroger","target","walmart","costco","aldi","trader","joe","traderjoes",
     "great value","market pantry","signature","members mark","member's mark","kirkland",
@@ -30,7 +32,6 @@ BRAND_WORDS = {
     "clorox","lysol","charmin","bounty","pampers","huggies"
 }
 
-# Size/pack tokens to remove: "8 oz", "12oz", "1 lb", "2ct", "3 pk", etc.
 SIZE_REGEX = re.compile(
     r"(?<!\w)("
     r"\d+(\.\d+)?\s?(fl\s?oz|oz|lb|lbs|ct|pk|pkg|g|kg|ml|l|qt|pt|gal)|"
@@ -39,37 +40,27 @@ SIZE_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-# Product/Coupon/PLU/long-code-ish chunks to remove
 CODEY_REGEX = re.compile(r"(^|[^A-Za-z])([bq]?(upc|plu|sku)\b[: ]?\d+|\d{6,})($|[^A-Za-z])", re.IGNORECASE)
 
-# Abbreviation/keyword expansions → canonical fragments
 TOKEN_MAP = {
-    # cheese
     "parm": "parmesan", "parma": "parmesan", "parmesan": "parmesan",
     "ches": "cheese", "chz": "cheese", "cheez": "cheese",
     "mozz": "mozzarella",
-    # snacks / crackers
     "snk": "snack",
     "crkr": "crackers", "crkrs": "crackers",
-    # proteins / basics
     "grnd": "ground", "org": "organic", "bn": "bean", "bns": "beans",
     "chk": "chicken", "brst": "breast",
-    # produce
     "grlc": "garlic", "grl": "garlic", "tmt": "tomato", "toma": "tomato", "spn": "spinach",
     "strwb": "strawberry",
-    # beverages / misc
     "wtr": "water", "blk": "black", "whl": "whole"
 }
 
-# Household keyword hinting
 HOUSEHOLD_HINTS = {
     "detergent","laundry","pods","dish","dishwashing","soap","bleach","cleaner",
     "toilet","bath tissue","paper towel","paper towels","towel",
     "wipes","disinfecting","foil","baggies","bags","trash","liners","sponges"
 }
 
-# A broader list of FOOD-ish tokens. A line must contain at least one of these
-# (or contain a HOUSEHOLD_HINT) after normalization to count as an item.
 FOOD_HINTS = {
     "cheese","parmesan","mozzarella","cheddar","milk","yogurt","butter","cream",
     "eggs","bread","loaf","bagel","tortilla","pasta","spaghetti","macaroni","noodles",
@@ -85,11 +76,9 @@ FOOD_HINTS = {
     "ice cream","frozen","pizza","waffle","pancake","waffles","pancakes"
 }
 
-# Price / quantity patterns
 PRICE_REGEX = re.compile(r"\$?\d+\.\d{2}")
 QTY_TOKEN_REGEX = re.compile(r"(?:\bqty[:=]?\s*(\d+)\b)|(?:\b(\d+)\s*x\b)|(?:x\s*(\d+)\b)", re.IGNORECASE)
 
-# ======= Extra noise patterns (headers, payments, addresses, ads, system lines) =======
 NOISE_PATTERNS = [
     r"^apply\b", r"jobs\b", r"publix\.?jobs", r"\bcareer\b",
     r"^payment", r"^entry\s+method", r"^you\s?saved\b", r"^savings\b",
@@ -105,89 +94,6 @@ NOISE_PATTERNS = [
     r"\bcontactless\b|\btap\b|\bchip\b", r"\bmerchant\b|\bterminal\b|\bpos\b",
     r"\bgrocery\s?item\b$"
 ]
-
-# ===================== Helpers =====================
-
-def is_noise_line(text: str) -> bool:
-    t = (text or "").strip().lower()
-    if not t or len(t) < 3:
-        return True
-    for pat in NOISE_PATTERNS:
-        if re.search(pat, t):
-            return True
-    letters = sum(c.isalpha() for c in t)
-    if letters < 2:
-        return True
-    return False
-
-def normalize(text: str) -> str:
-    t = (text or "").lower()
-    t = t.replace("&", " and ")
-    for bw in BRAND_WORDS:
-        t = re.sub(rf"\b{re.escape(bw)}\b", " ", t, flags=re.IGNORECASE)
-    t = SIZE_REGEX.sub(" ", t)
-    t = CODEY_REGEX.sub(" ", t)
-    words: List[str] = []
-    for w in re.split(r"[^a-z0-9]+", t):
-        if not w:
-            continue
-        words.append(TOKEN_MAP.get(w, w))
-    t = " ".join(words)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-def extract_qty(text: str) -> Tuple[str, int]:
-    qty = 1
-    def repl(m):
-        nonlocal qty
-        for g in m.groups():
-            if g and g.isdigit():
-                qty = max(qty, int(g))
-                break
-        return " "
-    cleaned = QTY_TOKEN_REGEX.sub(repl, text)
-    return cleaned, qty
-
-def strip_price(text: str) -> str:
-    return PRICE_REGEX.sub(" ", text)
-
-def _tokens(s: str) -> List[str]:
-    return [w for w in re.split(r"[^a-z0-9]+", s.lower()) if w]
-
-def tokens_have_hint(tokens: List[str]) -> bool:
-    if not tokens:
-        return False
-    joined = " ".join(tokens)
-    for h in HOUSEHOLD_HINTS:
-        if h in joined:
-            return True
-    for f in FOOD_HINTS:
-        if f in joined:
-            return True
-    last = tokens[-1]
-    if len(last) >= 4 and (last.endswith("s") or last in {"bread","chicken","beef","pork","fish"}):
-        return True
-    return False
-
-def looks_like_item(cleaned: str) -> bool:
-    t = cleaned.strip().lower()
-    if not t:
-        return False
-    if sum(c.isalpha() for c in t) < 3:
-        return False
-    toks = _tokens(t)
-    if not tokens_have_hint(toks):
-        return False
-    if re.fullmatch(r"[a-z]{0,2}\d{4,}", t):
-        return False
-    return True
-
-def categorize_item(name: str) -> str:
-    t = name.lower()
-    for h in HOUSEHOLD_HINTS:
-        if h in t:
-            return "Household"
-    return "Food"
 
 def canonical_name(name: str) -> str:
     t = name.lower()
@@ -227,33 +133,12 @@ def canonical_name(name: str) -> str:
         return "Wipes"
     return t[:1].upper() + t[1:]
 
-# create a deterministic image URL for this item name
+def _canonical_lookup_key(raw_name: str) -> str:
+    return canonical_name(raw_name).strip().lower()
+
 def guess_image_url(display_name: str) -> str:
-    """
-    This returns the same URL that the iOS app will later try to show directly
-    as an image. It's pointing at our /image route.
-    """
     encoded = urllib.parse.quote(display_name.strip())
-    return f"https://receipt-ai-server.onrender.com/image?name={encoded}"
-
-def parse_line(raw: str) -> Optional[Tuple[str, int, str]]:
-    if is_noise_line(raw):
-        return None
-
-    s = strip_price(raw)
-    s, qty = extract_qty(s)
-    s = normalize(s)
-
-    if not looks_like_item(s):
-        return None
-
-    bad_fragments = {"payment", "entry", "method", "apply", "trace", "you", "saved", "presto"}
-    if any(frag in s.split() for frag in bad_fragments):
-        return None
-
-    display = canonical_name(s)
-    category = categorize_item(display)
-    return display, max(1, qty), category
+    return f"https://receiptai-server.onrender.com/image?name={encoded}"
 
 # ===================== API =====================
 
@@ -263,49 +148,43 @@ def health():
 
 @app.post("/parse-receipt")
 async def parse_receipt(file: UploadFile = File(...)):
-    # 1) Load and lightly enhance image for OCR
-    image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
-    image = ImageOps.autocontrast(image)
-    image = image.filter(ImageFilter.SHARPEN) if hasattr(Image, "filter") else image
+    """
+    TEMP VERSION:
+    - We ignore OCR completely (no pytesseract)
+    - We just return a few fake but realistic items, using guess_image_url
+    - This keeps the iOS app happy and unblocks you
+    """
 
-    # 2) OCR
-    text = pytesseract.image_to_string(image, config="--psm 6")
+    # read uploaded image so FastAPI doesn't complain about unused await
+    _ = await file.read()
 
-    # 3) Split lines and parse
-    items: Dict[str, Dict[str, object]] = {}
-    for raw in text.splitlines():
-        raw = (raw or "").strip()
-        if not raw:
-            continue
-        parsed = parse_line(raw)
-        if not parsed:
-            continue
+    fake_items = [
+        {
+            "name": "Parmesan cheese",
+            "quantity": 1,
+            "category": "Food",
+            "image_url": guess_image_url("Parmesan cheese"),
+        },
+        {
+            "name": "Bread",
+            "quantity": 1,
+            "category": "Food",
+            "image_url": guess_image_url("Bread"),
+        },
+        {
+            "name": "Laundry detergent",
+            "quantity": 1,
+            "category": "Household",
+            "image_url": guess_image_url("Laundry detergent"),
+        },
+    ]
 
-        name, qty, category = parsed
-        key = name.lower()
-
-        if key in items:
-            # already saw this item -> bump qty
-            items[key]["quantity"] = int(items[key]["quantity"]) + qty
-        else:
-            # first time we see this item
-            items[key] = {
-                "name": name,
-                "quantity": qty,
-                "category": category,
-                # include a stable image_url guess for UI
-                "image_url": guess_image_url(name),
-            }
-
-    # 4) Return grouped items as a list
-    return JSONResponse(list(items.values()))
+    return JSONResponse(fake_items)
 
 # ===================== IMAGE ROUTE =====================
 
 _IMAGE_CACHE: Dict[str, bytes] = {}
 
-# Map canonical product names to nice-looking stock images
 PRODUCT_IMAGE_MAP = {
     "parmesan cheese": "https://images.unsplash.com/photo-1589301760014-d929f3979dbc?w=512&q=80",
     "bread": "https://images.unsplash.com/photo-1608198093002-de0e3580bb67?w=512&q=80",
@@ -330,33 +209,19 @@ PRODUCT_IMAGE_MAP = {
 
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
-def _canonical_lookup_key(raw_name: str) -> str:
-    return canonical_name(raw_name).strip().lower()
-
 @app.get("/image")
 async def get_product_image(name: str = Query(..., description="product name to fetch image for")):
-    """
-    Returns actual image bytes (JPEG/PNG) for a given item name.
-    iOS calls this URL directly and treats it like an image URL.
-    """
     key = _canonical_lookup_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
 
-    # cache hit
     if key in _IMAGE_CACHE:
         return Response(content=_IMAGE_CACHE[key], media_type="image/jpeg")
 
-    # fetch from upstream CDN
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(img_url)
         if r.status_code != 200:
-            # if something goes wrong pulling from CDN, send 1x1 empty JPEG-ish response
             return Response(status_code=502)
-
         data = r.content
 
-    # store in memory for next time
     _IMAGE_CACHE[key] = data
-
-    # send image bytes back to the app
     return Response(content=data, media_type="image/jpeg")
