@@ -1,6 +1,10 @@
 # main.py
 # FastAPI receipt parser with noise filtering, canonicalization, and deduplication.
+# Now using Google Cloud Vision instead of pytesseract, and using env var creds.
 
+import os
+import json
+import base64
 from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import JSONResponse, Response
 from typing import List, Tuple, Optional, Dict
@@ -9,11 +13,43 @@ import io
 import re
 import urllib.parse  # for safe URL encoding
 import httpx
-import os
 
-# Tell Google client libraries where to find your service account credentials.
-# key.json must exist in the same folder as this file on the server.
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "key.json"
+# ---------------- GOOGLE VISION SETUP ----------------
+#
+# We expect Render to provide GOOGLE_APPLICATION_CREDENTIALS_JSON as an env var.
+# We'll write that JSON to a temp file on disk so the Vision SDK can read it.
+
+VISION_TMP_PATH = "/tmp/gcloud_key.json"
+
+def _init_google_credentials_file():
+    creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if not creds_json:
+        print("WARNING: GOOGLE_APPLICATION_CREDENTIALS_JSON is not set")
+        return
+
+    try:
+        # creds_json is literal JSON text. Write it out.
+        with open(VISION_TMP_PATH, "w") as f:
+            f.write(creds_json)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = VISION_TMP_PATH
+        print("Google Vision creds wrote to /tmp and env var set.")
+    except Exception as e:
+        print("Failed to write Vision creds:", e)
+
+_init_google_credentials_file()
+
+# Import Vision only AFTER creds are prepared
+try:
+    from google.cloud import vision
+    _VISION_AVAILABLE = True
+    _vision_client = vision.ImageAnnotatorClient()
+    print("Google Vision client initialized.")
+except Exception as e:
+    print("Google Vision init failed:", e)
+    _VISION_AVAILABLE = False
+    _vision_client = None
+
+# =====================================================
 
 app = FastAPI()
 
@@ -140,7 +176,150 @@ def guess_image_url(display_name: str) -> str:
     encoded = urllib.parse.quote(display_name.strip())
     return f"https://receiptai-server.onrender.com/image?name={encoded}"
 
-# ===================== API =====================
+def is_noise_line(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t or len(t) < 3:
+        return True
+    for pat in NOISE_PATTERNS:
+        if re.search(pat, t):
+            return True
+    letters = sum(c.isalpha() for c in t)
+    if letters < 2:
+        return True
+    return False
+
+def normalize(text: str) -> str:
+    t = (text or "").lower()
+    t = t.replace("&", " and ")
+    for bw in BRAND_WORDS:
+        t = re.sub(rf"\b{re.escape(bw)}\b", " ", t, flags=re.IGNORECASE)
+    t = SIZE_REGEX.sub(" ", t)
+    t = CODEY_REGEX.sub(" ", t)
+    words: List[str] = []
+    for w in re.split(r"[^a-z0-9]+", t):
+        if not w:
+            continue
+        words.append(TOKEN_MAP.get(w, w))
+    t = " ".join(words)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def extract_qty(text: str) -> Tuple[str, int]:
+    qty = 1
+    def repl(m):
+        nonlocal qty
+        for g in m.groups():
+            if g and g.isdigit():
+                qty = max(qty, int(g))
+                break
+        return " "
+    cleaned = QTY_TOKEN_REGEX.sub(repl, text)
+    return cleaned, qty
+
+def strip_price(text: str) -> str:
+    return PRICE_REGEX.sub(" ", text)
+
+def _tokens(s: str) -> List[str]:
+    return [w for w in re.split(r"[^a-z0-9]+", s.lower()) if w]
+
+def tokens_have_hint(tokens: List[str]) -> bool:
+    if not tokens:
+        return False
+    joined = " ".join(tokens)
+    for h in HOUSEHOLD_HINTS:
+        if h in joined:
+            return True
+    for f in FOOD_HINTS:
+        if f in joined:
+            return True
+    last = tokens[-1]
+    if len(last) >= 4 and (last.endswith("s") or last in {"bread","chicken","beef","pork","fish"}):
+        return True
+    return False
+
+def looks_like_item(cleaned: str) -> bool:
+    t = cleaned.strip().lower()
+    if not t:
+        return False
+    if sum(c.isalpha() for c in t) < 3:
+        return False
+    toks = _tokens(t)
+    if not tokens_have_hint(toks):
+        return False
+    if re.fullmatch(r"[a-z]{0,2}\d{4,}", t):
+        return False
+    return True
+
+def categorize_item(name: str) -> str:
+    t = name.lower()
+    for h in HOUSEHOLD_HINTS:
+        if h in t:
+            return "Household"
+    return "Food"
+
+
+# ---------------- GOOGLE VISION OCR HELPERS ----------------
+
+def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
+    """
+    Send the image bytes to Google Vision and get raw text lines back.
+    If Vision setup failed (client is None), return [].
+    """
+    if not _VISION_AVAILABLE or _vision_client is None:
+        print("Vision client not available, returning [].")
+        return []
+
+    image = vision.Image(content=jpeg_bytes)
+    response = _vision_client.text_detection(image=image)
+
+    if response.error.message:
+        print("Vision API error:", response.error.message)
+        return []
+
+    full_text = response.full_text_annotation.text or ""
+    lines = [ln.strip() for ln in full_text.splitlines()]
+    return lines
+
+
+def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
+    """
+    Take OCR text lines, clean them, group duplicates, guess qty/category/image.
+    """
+    items: Dict[str, Dict[str, object]] = {}
+
+    for raw in lines:
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+
+        if is_noise_line(raw):
+            continue
+
+        without_price = strip_price(raw)
+        without_price, qty = extract_qty(without_price)
+        norm = normalize(without_price)
+
+        if not looks_like_item(norm):
+            continue
+
+        display = canonical_name(norm)
+        category = categorize_item(display)
+        key = display.lower()
+
+        if key in items:
+            items[key]["quantity"] = int(items[key]["quantity"]) + qty
+        else:
+            items[key] = {
+                "name": display,
+                "quantity": qty,
+                "category": category,
+                "image_url": guess_image_url(display),
+            }
+
+    return list(items.values())
+
+
+# ===================== API ROUTES =====================
 
 @app.get("/health")
 def health():
@@ -149,37 +328,33 @@ def health():
 @app.post("/parse-receipt")
 async def parse_receipt(file: UploadFile = File(...)):
     """
-    TEMP VERSION:
-    - We ignore OCR completely (no pytesseract)
-    - We just return a few fake but realistic items, using guess_image_url
-    - This keeps the iOS app happy and unblocks you
+    1. Read the uploaded image (JPEG basically).
+    2. Run Google Vision OCR to get all text lines.
+    3. Parse those lines into structured items.
+    4. Return items to the iOS app.
     """
+    jpeg_bytes = await file.read()
 
-    # read uploaded image so FastAPI doesn't complain about unused await
-    _ = await file.read()
+    # light pre-process just like before
+    try:
+        pil_img = Image.open(io.BytesIO(jpeg_bytes)).convert("L")
+        pil_img = ImageOps.autocontrast(pil_img)
+        pil_img = pil_img.filter(ImageFilter.SHARPEN) if hasattr(Image, "filter") else pil_img
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=90)
+        processed_bytes = buf.getvalue()
+    except Exception as e:
+        print("Preprocess failed, using raw bytes:", e)
+        processed_bytes = jpeg_bytes
 
-    fake_items = [
-        {
-            "name": "Parmesan cheese",
-            "quantity": 1,
-            "category": "Food",
-            "image_url": guess_image_url("Parmesan cheese"),
-        },
-        {
-            "name": "Bread",
-            "quantity": 1,
-            "category": "Food",
-            "image_url": guess_image_url("Bread"),
-        },
-        {
-            "name": "Laundry detergent",
-            "quantity": 1,
-            "category": "Household",
-            "image_url": guess_image_url("Laundry detergent"),
-        },
-    ]
+    # OCR via Google Vision
+    lines = run_google_vision_ocr(processed_bytes)
 
-    return JSONResponse(fake_items)
+    # Parse lines -> items
+    items_list = parse_lines_to_items(lines)
+
+    # If Vision failed or returned nothing, send back empty list (not 500)
+    return JSONResponse(items_list)
 
 # ===================== IMAGE ROUTE =====================
 
