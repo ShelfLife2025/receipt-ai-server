@@ -76,7 +76,10 @@ SIZE_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-CODEY_REGEX = re.compile(r"(^|[^A-Za-z])([bq]?(upc|plu|sku)\b[: ]?\d+|\d{6,})($|[^A-Za-z])", re.IGNORECASE)
+CODEY_REGEX = re.compile(
+    r"(^|[^A-Za-z])([bq]?(upc|plu|sku)\b[: ]?\d+|\d{6,})($|[^A-Za-z])",
+    re.IGNORECASE,
+)
 
 TOKEN_MAP = {
     "parm": "parmesan", "parma": "parmesan", "parmesan": "parmesan",
@@ -113,7 +116,10 @@ FOOD_HINTS = {
 }
 
 PRICE_REGEX = re.compile(r"\$?\d+\.\d{2}")
-QTY_TOKEN_REGEX = re.compile(r"(?:\bqty[:=]?\s*(\d+)\b)|(?:\b(\d+)\s*x\b)|(?:x\s*(\d+)\b)", re.IGNORECASE)
+QTY_TOKEN_REGEX = re.compile(
+    r"(?:\bqty[:=]?\s*(\d+)\b)|(?:\b(\d+)\s*x\b)|(?:x\s*(\d+)\b)",
+    re.IGNORECASE,
+)
 
 NOISE_PATTERNS = [
     r"^apply\b", r"jobs\b", r"publix\.?jobs", r"\bcareer\b",
@@ -179,8 +185,7 @@ def guess_image_url(display_name: str) -> str:
 def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> str:
     """
     Try to return a more brand-specific product image if we can guess a brand
-    from the raw receipt line (e.g. 'SARGENTO SHRED PARM 8OZ').
-    Fallback to our generic /image route.
+    from the raw receipt line. Fallback to our generic /image route.
     """
     line_lower = (original_line or "").lower()
 
@@ -204,7 +209,6 @@ def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> st
         if brand in line_lower:
             return url
 
-    # generic fallback -> this hits our /image route
     return guess_image_url(cleaned_display_name)
 
 def is_noise_line(text: str) -> bool:
@@ -313,8 +317,6 @@ def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
 def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
     """
     Take OCR text lines, clean them, group duplicates, guess qty/category/image.
-    Now we also call guess_branded_image_url() so we can attach
-    brand-looking images (Sargento, Tide, etc) instead of just generic photos.
     """
     items: Dict[str, Dict[str, object]] = {}
 
@@ -337,8 +339,11 @@ def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
         category = categorize_item(display)
         key = display.lower()
 
-        # choose image
-        img_url = guess_branded_image_url(original_line=raw, cleaned_display_name=display)
+        # choose image url for the app
+        img_url = guess_branded_image_url(
+            original_line=raw,
+            cleaned_display_name=display
+        )
 
         if key in items:
             items[key]["quantity"] = int(items[key]["quantity"]) + qty
@@ -368,7 +373,7 @@ async def parse_receipt(file: UploadFile = File(...)):
     """
     jpeg_bytes = await file.read()
 
-    # light pre-process just like before
+    # light pre-process
     try:
         pil_img = Image.open(io.BytesIO(jpeg_bytes)).convert("L")
         pil_img = ImageOps.autocontrast(pil_img)
@@ -386,15 +391,14 @@ async def parse_receipt(file: UploadFile = File(...)):
     # Parse lines -> items
     items_list = parse_lines_to_items(lines)
 
-    # If Vision failed or returned nothing, send back empty list (not 500)
     return JSONResponse(items_list)
 
-# ===================== IMAGE SEARCH / DELIVERY =====================
+# ===================== IMAGE DELIVERY =====================
 
-# in-memory cache: product key -> final JPEG bytes
+# in-memory cache: product key -> final bytes
 _IMAGE_CACHE: Dict[str, bytes] = {}
 
-# nice manual fallbacks, like before
+# manual brand-ish fallbacks
 PRODUCT_IMAGE_MAP = {
     "parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
     "mozzarella cheese": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
@@ -426,12 +430,15 @@ PRODUCT_IMAGE_MAP = {
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
 async def fetch_bytes(url: str) -> Optional[bytes]:
-    """Download bytes from a URL (jpg, png, webp allowed)."""
+    """Download bytes from a URL (jpg/png/etc). Safe-wrapped."""
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200:
-            return None
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as client:
+            r = await client.get(url)
+        r.raise_for_status()
         ctype = r.headers.get("Content-Type", "").lower()
         if "image" not in ctype:
             return None
@@ -440,86 +447,35 @@ async def fetch_bytes(url: str) -> Optional[bytes]:
         print("fetch_bytes error:", e)
         return None
 
-async def search_google_shopping_image(query: str) -> Optional[bytes]:
-    """
-    Try to grab a product-looking thumbnail by hitting Google Images heuristically.
-    This is best-effort and may fail sometimes. If it fails, we'll fall back.
-    """
-    try:
-        q = urllib.parse.quote_plus(query + " product photo")
-        url = (
-            "https://www.google.com/search"
-            "?tbm=isch&safe=active&hl=en&ijn=0&"
-            f"q={q}"
-        )
-
-        async with httpx.AsyncClient(
-            timeout=10.0,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-        ) as client:
-            resp = await client.get(url)
-
-        if resp.status_code != 200:
-            print("google image search bad status:", resp.status_code)
-            return None
-
-        html = resp.text
-
-        # naive scrape: find first likely direct image URL
-        m = re.search(r"https://[^\"']+\.(?:jpg|jpeg|png|webp)", html, re.IGNORECASE)
-        if not m:
-            print("no image url match in google html")
-            return None
-
-        img_url = m.group(0)
-        print("image candidate:", img_url)
-
-        return await fetch_bytes(img_url)
-
-    except Exception as e:
-        print("search_google_shopping_image error:", e)
-        return None
-
 @app.get("/image")
 async def get_product_image(name: str = Query(..., description="product name to fetch image for")):
     """
-    1. If we already cached bytes for this product name, return them.
-    2. Else try live product-style image (search_google_shopping_image).
-    3. Else fall back to our curated Unsplash-style photo.
-    4. Else return a 1x1 pixel jpeg so the UI never breaks.
+    Stable image endpoint:
+    1. Canonicalize the name.
+    2. If cached bytes exist, return them.
+    3. Otherwise, try PRODUCT_IMAGE_MAP (Unsplash-ish brand-style photo).
+    4. If that fails, return a 1x1 transparent PNG so we never crash.
     """
     key = _canonical_lookup_key(name)
 
-    # 1. cache hit?
+    # 1. cache hit
     if key in _IMAGE_CACHE:
         return Response(content=_IMAGE_CACHE[key], media_type="image/jpeg")
 
-    # 2. try live "product" image
-    live_bytes = await search_google_shopping_image(name)
-    if live_bytes:
-        _IMAGE_CACHE[key] = live_bytes
-        return Response(content=live_bytes, media_type="image/jpeg")
+    # 2. pick a URL from our curated map (or fallback)
+    img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
 
-    # 3. fallback to our manual list / Unsplash
-    fallback_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
-    fallback_bytes = await fetch_bytes(fallback_url)
-    if fallback_bytes:
-        _IMAGE_CACHE[key] = fallback_bytes
-        return Response(content=fallback_bytes, media_type="image/jpeg")
+    # 3. try to download that URL
+    img_bytes = await fetch_bytes(img_url)
+    if img_bytes:
+        _IMAGE_CACHE[key] = img_bytes
+        return Response(content=img_bytes, media_type="image/jpeg")
 
-    # 4. absolute last resort: tiny 1x1 so the app UI has *something*
-    tiny_jpeg = base64.b64decode(
-        b"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYW"
-        b"GTEiJCQmLjQxND8+Q0RFRUZDXFtcYGNleXp4eXyDhIWGh4iJiouPkZCX/2wBD"
-        b"ARATGBcaICTCjI+Pj5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+"
-        b"fn5+fn5+fn5+fn5+fn5+fn5+/wAARCAABAAEDAREAAhEBAxEB/8QAFQABAQAAA"
-        b"AAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAA"
-        b"AAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AMf/"
-        b"2Q=="
+    # 4. last resort: 1x1 transparent PNG so the UI always gets something
+    TINY_PNG_BASE64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
+        "ASsJTYQAAAAASUVORK5CYII="
     )
-    _IMAGE_CACHE[key] = tiny_jpeg
-    return Response(content=tiny_jpeg, media_type="image/jpeg")
+    tiny_bytes = base64.b64decode(TINY_PNG_BASE64)
+    _IMAGE_CACHE[key] = tiny_bytes
+    return Response(content=tiny_bytes, media_type="image/png")
