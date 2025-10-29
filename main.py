@@ -185,7 +185,7 @@ def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> st
     line_lower = (original_line or "").lower()
 
     BRAND_IMAGE_MAP = {
-        # Cheese bags / dairy brands
+        # Cheese / dairy brands
         "sargento": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
         "kraft": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
         "chobani": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?w=512&q=80",
@@ -204,7 +204,7 @@ def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> st
         if brand in line_lower:
             return url
 
-    # generic fallback
+    # generic fallback -> this hits our /image route
     return guess_image_url(cleaned_display_name)
 
 def is_noise_line(text: str) -> bool:
@@ -288,7 +288,6 @@ def categorize_item(name: str) -> str:
             return "Household"
     return "Food"
 
-
 # ---------------- GOOGLE VISION OCR HELPERS ----------------
 
 def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
@@ -310,7 +309,6 @@ def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
     full_text = response.full_text_annotation.text or ""
     lines = [ln.strip() for ln in full_text.splitlines()]
     return lines
-
 
 def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
     """
@@ -354,7 +352,6 @@ def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
 
     return list(items.values())
 
-
 # ===================== API ROUTES =====================
 
 @app.get("/health")
@@ -392,10 +389,12 @@ async def parse_receipt(file: UploadFile = File(...)):
     # If Vision failed or returned nothing, send back empty list (not 500)
     return JSONResponse(items_list)
 
-# ===================== IMAGE ROUTE =====================
+# ===================== IMAGE SEARCH / DELIVERY =====================
 
+# in-memory cache: product key -> final JPEG bytes
 _IMAGE_CACHE: Dict[str, bytes] = {}
 
+# nice manual fallbacks, like before
 PRODUCT_IMAGE_MAP = {
     "parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
     "mozzarella cheese": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
@@ -413,7 +412,7 @@ PRODUCT_IMAGE_MAP = {
 
     "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
     "panera mac & cheese": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
-    "rao marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
+    "rao's marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
 
     "paper towels": "https://images.unsplash.com/photo-1581579186981-5f3f0c612e75?w=512&q=80",
     "toilet paper": "https://images.unsplash.com/photo-1584559582151-fb1dfa8b33a5?w=512&q=80",
@@ -426,19 +425,101 @@ PRODUCT_IMAGE_MAP = {
 
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
+async def fetch_bytes(url: str) -> Optional[bytes]:
+    """Download bytes from a URL (jpg, png, webp allowed)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        ctype = r.headers.get("Content-Type", "").lower()
+        if "image" not in ctype:
+            return None
+        return r.content
+    except Exception as e:
+        print("fetch_bytes error:", e)
+        return None
+
+async def search_google_shopping_image(query: str) -> Optional[bytes]:
+    """
+    Try to grab a product-looking thumbnail by hitting Google Images heuristically.
+    This is best-effort and may fail sometimes. If it fails, we'll fall back.
+    """
+    try:
+        q = urllib.parse.quote_plus(query + " product photo")
+        url = (
+            "https://www.google.com/search"
+            "?tbm=isch&safe=active&hl=en&ijn=0&"
+            f"q={q}"
+        )
+
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        ) as client:
+            resp = await client.get(url)
+
+        if resp.status_code != 200:
+            print("google image search bad status:", resp.status_code)
+            return None
+
+        html = resp.text
+
+        # naive scrape: find first likely direct image URL
+        m = re.search(r"https://[^\"']+\.(?:jpg|jpeg|png|webp)", html, re.IGNORECASE)
+        if not m:
+            print("no image url match in google html")
+            return None
+
+        img_url = m.group(0)
+        print("image candidate:", img_url)
+
+        return await fetch_bytes(img_url)
+
+    except Exception as e:
+        print("search_google_shopping_image error:", e)
+        return None
+
 @app.get("/image")
 async def get_product_image(name: str = Query(..., description="product name to fetch image for")):
+    """
+    1. If we already cached bytes for this product name, return them.
+    2. Else try live product-style image (search_google_shopping_image).
+    3. Else fall back to our curated Unsplash-style photo.
+    4. Else return a 1x1 pixel jpeg so the UI never breaks.
+    """
     key = _canonical_lookup_key(name)
-    img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
 
+    # 1. cache hit?
     if key in _IMAGE_CACHE:
         return Response(content=_IMAGE_CACHE[key], media_type="image/jpeg")
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(img_url)
-        if r.status_code != 200:
-            return Response(status_code=502)
-        data = r.content
+    # 2. try live "product" image
+    live_bytes = await search_google_shopping_image(name)
+    if live_bytes:
+        _IMAGE_CACHE[key] = live_bytes
+        return Response(content=live_bytes, media_type="image/jpeg")
 
-    _IMAGE_CACHE[key] = data
-    return Response(content=data, media_type="image/jpeg")
+    # 3. fallback to our manual list / Unsplash
+    fallback_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
+    fallback_bytes = await fetch_bytes(fallback_url)
+    if fallback_bytes:
+        _IMAGE_CACHE[key] = fallback_bytes
+        return Response(content=fallback_bytes, media_type="image/jpeg")
+
+    # 4. absolute last resort: tiny 1x1 so the app UI has *something*
+    tiny_jpeg = base64.b64decode(
+        b"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYW"
+        b"GTEiJCQmLjQxND8+Q0RFRUZDXFtcYGNleXp4eXyDhIWGh4iJiouPkZCX/2wBD"
+        b"ARATGBcaICTCjI+Pj5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+"
+        b"fn5+fn5+fn5+fn5+fn5+fn5+/wAARCAABAAEDAREAAhEBAxEB/8QAFQABAQAAA"
+        b"AAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAA"
+        b"AAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AMf/"
+        b"2Q=="
+    )
+    _IMAGE_CACHE[key] = tiny_jpeg
+    return Response(content=tiny_jpeg, media_type="image/jpeg")
