@@ -176,6 +176,37 @@ def guess_image_url(display_name: str) -> str:
     encoded = urllib.parse.quote(display_name.strip())
     return f"https://receiptai-server.onrender.com/image?name={encoded}"
 
+def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> str:
+    """
+    Try to return a more brand-specific product image if we can guess a brand
+    from the raw receipt line (e.g. 'SARGENTO SHRED PARM 8OZ').
+    Fallback to our generic /image route.
+    """
+    line_lower = (original_line or "").lower()
+
+    BRAND_IMAGE_MAP = {
+        # Cheese bags / dairy brands
+        "sargento": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
+        "kraft": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
+        "chobani": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?w=512&q=80",
+
+        # Paper goods
+        "bounty": "https://images.unsplash.com/photo-1581579186981-5f3f0c612e75?w=512&q=80",
+        "charmin": "https://images.unsplash.com/photo-1584559582151-fb1dfa8b33a5?w=512&q=80",
+
+        # Cleaning / laundry
+        "clorox": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
+        "tide": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
+        "gain": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
+    }
+
+    for brand, url in BRAND_IMAGE_MAP.items():
+        if brand in line_lower:
+            return url
+
+    # generic fallback
+    return guess_image_url(cleaned_display_name)
+
 def is_noise_line(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t or len(t) < 3:
@@ -284,6 +315,8 @@ def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
 def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
     """
     Take OCR text lines, clean them, group duplicates, guess qty/category/image.
+    Now we also call guess_branded_image_url() so we can attach
+    brand-looking images (Sargento, Tide, etc) instead of just generic photos.
     """
     items: Dict[str, Dict[str, object]] = {}
 
@@ -306,6 +339,9 @@ def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
         category = categorize_item(display)
         key = display.lower()
 
+        # choose image
+        img_url = guess_branded_image_url(original_line=raw, cleaned_display_name=display)
+
         if key in items:
             items[key]["quantity"] = int(items[key]["quantity"]) + qty
         else:
@@ -313,7 +349,7 @@ def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
                 "name": display,
                 "quantity": qty,
                 "category": category,
-                "image_url": guess_image_url(display),
+                "image_url": img_url,
             }
 
     return list(items.values())
@@ -361,25 +397,31 @@ async def parse_receipt(file: UploadFile = File(...)):
 _IMAGE_CACHE: Dict[str, bytes] = {}
 
 PRODUCT_IMAGE_MAP = {
-    "parmesan cheese": "https://images.unsplash.com/photo-1589301760014-d929f3979dbc?w=512&q=80",
-    "bread": "https://images.unsplash.com/photo-1608198093002-de0e3580bb67?w=512&q=80",
-    "yogurt": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?w=512&q=80",
-    "garlic": "https://images.unsplash.com/photo-1506806732259-39c2d0268443?w=512&q=80",
-    "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
-    "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
-    "panera mac & cheese": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
+    "parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
     "mozzarella cheese": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
     "cheddar cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
-    "crackers": "https://images.unsplash.com/photo-1603048297340-5e05ad3e3b80?w=512&q=80",
+
+    "bread": "https://images.unsplash.com/photo-1608198093002-de0e3580bb67?w=512&q=80",
+    "bagels": "https://images.unsplash.com/photo-1509440159596-0249088772ff?w=512&q=80",
+
+    "yogurt": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?w=512&q=80",
+    "cream cheese": "https://images.unsplash.com/photo-1589301763197-9713a1e1e5c0?w=512&q=80",
+
+    "garlic": "https://images.unsplash.com/photo-1506806732259-39c2d0268443?w=512&q=80",
+    "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
+    "grapes": "https://images.unsplash.com/photo-1601004890211-3f3d02dd3c10?w=512&q=80",
+
+    "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
+    "panera mac & cheese": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
+    "rao marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
+
     "paper towels": "https://images.unsplash.com/photo-1581579186981-5f3f0c612e75?w=512&q=80",
     "toilet paper": "https://images.unsplash.com/photo-1584559582151-fb1dfa8b33a5?w=512&q=80",
     "laundry detergent": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
     "laundry pods": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
+
     "water": "https://images.unsplash.com/photo-1561043433-aaf687c4cf4e?w=512&q=80",
-    "rao marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
-    "cream cheese": "https://images.unsplash.com/photo-1589301763197-9713a1e1e5c0?w=512&q=80",
-    "bagels": "https://images.unsplash.com/photo-1509440159596-0249088772ff?w=512&q=80",
-    "grapes": "https://images.unsplash.com/photo-1601004890211-3f3d02dd3c10?w=512&q=80",
+    "ketchup": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
 }
 
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
