@@ -6,3 +6,4 @@ pytesseract
 httpx
 python-multipart
 python-multipart
+google-cloud-vision
