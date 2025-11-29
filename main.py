@@ -1,34 +1,40 @@
 # main.py
 # FastAPI receipt parser with noise filtering, canonicalization, and deduplication.
-# Now using Google Cloud Vision instead of pytesseract, and using env var creds.
+# Google Cloud Vision OCR with env var creds. Includes optional debug mode.
+
+from __future__ import annotations
 
 import os
-import json
 import base64
-from fastapi import FastAPI, File, UploadFile, Query
-from fastapi.responses import JSONResponse, Response
-from typing import List, Tuple, Optional, Dict
-from PIL import Image, ImageOps, ImageFilter
 import io
 import re
-import urllib.parse  # for safe URL encoding
+import urllib.parse
+from typing import List, Tuple, Optional, Dict, Any
+
 import httpx
+from fastapi import FastAPI, File, UploadFile, Query, Request
+from fastapi.responses import JSONResponse, Response
+from PIL import Image, ImageOps, ImageFilter
 
 # ---------------- GOOGLE VISION SETUP ----------------
 #
-# We expect Render to provide GOOGLE_APPLICATION_CREDENTIALS_JSON as an env var.
-# We'll write that JSON to a temp file on disk so the Vision SDK can read it.
+# Render provides GOOGLE_APPLICATION_CREDENTIALS_JSON as an env var (literal JSON).
+# We write it to disk and set GOOGLE_APPLICATION_CREDENTIALS so Vision SDK can read it.
 
 VISION_TMP_PATH = "/tmp/gcloud_key.json"
 
-def _init_google_credentials_file():
+
+def _init_google_credentials_file() -> None:
     creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     if not creds_json:
-        print("WARNING: GOOGLE_APPLICATION_CREDENTIALS_JSON is not set")
+        # If user already configured GOOGLE_APPLICATION_CREDENTIALS another way, that's fine.
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            print("Google creds: using GOOGLE_APPLICATION_CREDENTIALS already set.")
+        else:
+            print("WARNING: GOOGLE_APPLICATION_CREDENTIALS_JSON is not set (Vision may be unavailable).")
         return
 
     try:
-        # creds_json is literal JSON text. Write it out.
         with open(VISION_TMP_PATH, "w") as f:
             f.write(creds_json)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = VISION_TMP_PATH
@@ -36,36 +42,45 @@ def _init_google_credentials_file():
     except Exception as e:
         print("Failed to write Vision creds:", e)
 
+
 _init_google_credentials_file()
 
-# Import Vision only AFTER creds are prepared
 try:
-    from google.cloud import vision
+    from google.cloud import vision  # type: ignore
+
     _VISION_AVAILABLE = True
-    _vision_client = vision.ImageAnnotatorClient()
-    print("Google Vision client initialized.")
+    try:
+        _vision_client = vision.ImageAnnotatorClient()
+        print("Google Vision client initialized.")
+    except Exception as e:
+        _vision_client = None
+        print("Google Vision client init failed:", e)
 except Exception as e:
-    print("Google Vision init failed:", e)
+    print("Google Vision import failed:", e)
     _VISION_AVAILABLE = False
     _vision_client = None
 
-# =====================================================
+# ---------------- APP ----------------
+# Keep title/version matching your deployed openapi
+app = FastAPI(title="FastAPI", version="0.1.0")
 
-app = FastAPI()
+# ---------------- PUBLIC BASE URL (NO MORE HARDCODED OLD DOMAIN) ----------------
+# If set, this wins. Otherwise we’ll fall back to the incoming request base URL.
+PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
 
 # ===================== Canonicalization / Dictionaries =====================
 
 BRAND_WORDS = {
-    "publix","kroger","target","walmart","costco","aldi","trader","joe","traderjoes",
-    "great value","market pantry","signature","members mark","member's mark","kirkland",
-    "kell","kellogg","kelloggs","kellogg's","nabisco","ritz","cheez it","general mills",
-    "frito lay","lays","pringles","campbell","progresso","annies","annie's","yoplait",
-    "chobani","silk","oatly","fairlife","starbucks","dunkin","folgers","maxwell house",
-    "sargento","kraft","classico","barilla","ronzoni","buitoni","goya","old el paso",
-    "ben & jerry","ben and jerry","haagen dazs","breyers","blue bell","blue bunny",
-    "tyson","perdue","jennie o","oscar mayer","hormel","boar","boar's head","boars head",
-    "pillsbury","betty crocker","land o lakes","challenge","tide","gain","downy","dawn",
-    "clorox","lysol","charmin","bounty","pampers","huggies"
+    "publix", "kroger", "target", "walmart", "costco", "aldi", "trader", "joe", "traderjoes",
+    "great value", "market pantry", "signature", "members mark", "member's mark", "kirkland",
+    "kell", "kellogg", "kelloggs", "kellogg's", "nabisco", "ritz", "cheez it", "general mills",
+    "frito lay", "lays", "pringles", "campbell", "progresso", "annies", "annie's", "yoplait",
+    "chobani", "silk", "oatly", "fairlife", "starbucks", "dunkin", "folgers", "maxwell house",
+    "sargento", "kraft", "classico", "barilla", "ronzoni", "buitoni", "goya", "old el paso",
+    "ben & jerry", "ben and jerry", "haagen dazs", "breyers", "blue bell", "blue bunny",
+    "tyson", "perdue", "jennie o", "oscar mayer", "hormel", "boar", "boar's head", "boars head",
+    "pillsbury", "betty crocker", "land o lakes", "challenge", "tide", "gain", "downy", "dawn",
+    "clorox", "lysol", "charmin", "bounty", "pampers", "huggies"
 }
 
 SIZE_REGEX = re.compile(
@@ -95,31 +110,37 @@ TOKEN_MAP = {
 }
 
 HOUSEHOLD_HINTS = {
-    "detergent","laundry","pods","dish","dishwashing","soap","bleach","cleaner",
-    "toilet","bath tissue","paper towel","paper towels","towel",
-    "wipes","disinfecting","foil","baggies","bags","trash","liners","sponges"
+    "detergent", "laundry", "pods", "dish", "dishwashing", "soap", "bleach", "cleaner",
+    "toilet", "bath tissue", "paper towel", "paper towels", "towel",
+    "wipes", "disinfecting", "foil", "baggies", "bags", "trash", "liners", "sponges"
 }
 
 FOOD_HINTS = {
-    "cheese","parmesan","mozzarella","cheddar","milk","yogurt","butter","cream",
-    "eggs","bread","loaf","bagel","tortilla","pasta","spaghetti","macaroni","noodles",
-    "rice","cereal","oatmeal","granola","cracker","crackers","chips","snack","cookies",
-    "tomato","tomatoes","lettuce","spinach","greens","kale","broccoli","carrot","onion",
-    "garlic","pepper","cucumber","apple","banana","strawberry","berries","lemon","lime",
-    "orange","grapes","avocado","potato","sweet potato","mushroom",
-    "chicken","beef","pork","turkey","sausage","bacon","ham",
-    "fish","salmon","tuna","shrimp",
-    "hummus","salsa","guacamole","ketchup","mustard","mayo","mayonnaise","pesto",
-    "yoghurt","coffee","tea","juice","water","soda","sparkling","broth","stock",
-    "flour","sugar","salt","pepper","spice","seasoning","oil","olive oil","vinegar",
-    "ice cream","frozen","pizza","waffle","pancake","waffles","pancakes"
+    "cheese", "parmesan", "mozzarella", "cheddar", "milk", "yogurt", "butter", "cream",
+    "eggs", "bread", "loaf", "bagel", "tortilla", "pasta", "spaghetti", "macaroni", "noodles",
+    "rice", "cereal", "oatmeal", "granola", "cracker", "crackers", "chips", "snack", "cookies",
+    "tomato", "tomatoes", "lettuce", "spinach", "greens", "kale", "broccoli", "carrot", "onion",
+    "garlic", "pepper", "cucumber", "apple", "banana", "strawberry", "berries", "lemon", "lime",
+    "orange", "grapes", "avocado", "potato", "sweet potato", "mushroom",
+    "chicken", "beef", "pork", "turkey", "sausage", "bacon", "ham",
+    "fish", "salmon", "tuna", "shrimp",
+    "hummus", "salsa", "guacamole", "ketchup", "mustard", "mayo", "mayonnaise", "pesto",
+    "yoghurt", "coffee", "tea", "juice", "water", "soda", "sparkling", "broth", "stock",
+    "flour", "sugar", "salt", "pepper", "spice", "seasoning", "oil", "olive oil", "vinegar",
+    "ice cream", "frozen", "pizza", "waffle", "pancake", "waffles", "pancakes"
 }
 
 PRICE_REGEX = re.compile(r"\$?\d+\.\d{2}")
+# "x2", "2 x", "qty:2" etc
 QTY_TOKEN_REGEX = re.compile(
     r"(?:\bqty[:=]?\s*(\d+)\b)|(?:\b(\d+)\s*x\b)|(?:x\s*(\d+)\b)",
     re.IGNORECASE,
 )
+
+# Publix often OCRs item then price-only line under it (ex: "ORG BEA" then "5.29 E")
+PRICE_ONLY_LINE_RE = re.compile(r"^\s*\$?\d{1,4}\.\d{2}\s*[A-Za-z]?\s*$")
+TRAILING_PRICE_RE = re.compile(r"(\$?\d{1,4}\.\d{2})\s*$")
+TRAILING_LONG_CODE_RE = re.compile(r"\b\d{4,}\b$")
 
 NOISE_PATTERNS = [
     r"^apply\b", r"jobs\b", r"publix\.?jobs", r"\bcareer\b",
@@ -134,11 +155,13 @@ NOISE_PATTERNS = [
     r"\b\d{1,4}\s+[A-Za-z0-9]+\s+(ave|avenue|st|street|rd|road|blvd|drive|dr)\b",
     r"\btrace\s*#?:?\s*\d+\b", r"\bacct\s*#?:?\s*\w+\b",
     r"\bcontactless\b|\btap\b|\bchip\b", r"\bmerchant\b|\bterminal\b|\bpos\b",
-    r"\bgrocery\s?item\b$"
+    r"\bgrocery\s?item\b$",
 ]
 
+# ===================== Canonical helpers =====================
+
 def canonical_name(name: str) -> str:
-    t = name.lower()
+    t = (name or "").strip().lower()
     if "parmesan" in t and "cheese" in t:
         return "Parmesan cheese"
     if "mozzarella" in t and "cheese" in t:
@@ -173,16 +196,26 @@ def canonical_name(name: str) -> str:
         return "Toilet paper"
     if "wipe" in t:
         return "Wipes"
-    return t[:1].upper() + t[1:]
+    return t[:1].upper() + t[1:] if t else ""
+
 
 def _canonical_lookup_key(raw_name: str) -> str:
     return canonical_name(raw_name).strip().lower()
 
-def guess_image_url(display_name: str) -> str:
-    encoded = urllib.parse.quote(display_name.strip())
-    return f"https://receiptai-server.onrender.com/image?name={encoded}"
 
-def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> str:
+def _base_url(request: Request) -> str:
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    # e.g. "https://receipt-ai-server.onrender.com/"
+    return str(request.base_url).rstrip("/")
+
+
+def guess_image_url(request: Request, display_name: str) -> str:
+    encoded = urllib.parse.quote((display_name or "").strip())
+    return f"{_base_url(request)}/image?name={encoded}"
+
+
+def guess_branded_image_url(request: Request, original_line: str, cleaned_display_name: str) -> str:
     """
     Try to return a more brand-specific product image if we can guess a brand
     from the raw receipt line. Fallback to our generic /image route.
@@ -190,16 +223,11 @@ def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> st
     line_lower = (original_line or "").lower()
 
     BRAND_IMAGE_MAP = {
-        # Cheese / dairy brands
         "sargento": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
         "kraft": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
         "chobani": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?w=512&q=80",
-
-        # Paper goods
         "bounty": "https://images.unsplash.com/photo-1581579186981-5f3f0c612e75?w=512&q=80",
         "charmin": "https://images.unsplash.com/photo-1584559582151-fb1dfa8b33a5?w=512&q=80",
-
-        # Cleaning / laundry
         "clorox": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
         "tide": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
         "gain": "https://images.unsplash.com/photo-1581579187080-9f31fa8c7c53?w=512&q=80",
@@ -209,7 +237,9 @@ def guess_branded_image_url(original_line: str, cleaned_display_name: str) -> st
         if brand in line_lower:
             return url
 
-    return guess_image_url(cleaned_display_name)
+    return guess_image_url(request, cleaned_display_name)
+
+# ===================== Parsing helpers =====================
 
 def is_noise_line(text: str) -> bool:
     t = (text or "").strip().lower()
@@ -218,79 +248,104 @@ def is_noise_line(text: str) -> bool:
     for pat in NOISE_PATTERNS:
         if re.search(pat, t):
             return True
+
+    # price-only / mostly numeric lines = noise
     letters = sum(c.isalpha() for c in t)
-    if letters < 2:
+    digits = sum(c.isdigit() for c in t)
+    if letters == 0 and digits > 0:
         return True
+
     return False
+
 
 def normalize(text: str) -> str:
     t = (text or "").lower()
     t = t.replace("&", " and ")
+
     for bw in BRAND_WORDS:
         t = re.sub(rf"\b{re.escape(bw)}\b", " ", t, flags=re.IGNORECASE)
+
     t = SIZE_REGEX.sub(" ", t)
     t = CODEY_REGEX.sub(" ", t)
+
     words: List[str] = []
     for w in re.split(r"[^a-z0-9]+", t):
         if not w:
             continue
         words.append(TOKEN_MAP.get(w, w))
+
     t = " ".join(words)
     t = re.sub(r"\s+", " ", t).strip()
+
+    # strip trailing price/codes that sneak through OCR merges
+    t = TRAILING_PRICE_RE.sub("", t).strip()
+    t = TRAILING_LONG_CODE_RE.sub("", t).strip()
     return t
+
 
 def extract_qty(text: str) -> Tuple[str, int]:
     qty = 1
-    def repl(m):
+
+    def repl(m: re.Match) -> str:
         nonlocal qty
         for g in m.groups():
             if g and g.isdigit():
                 qty = max(qty, int(g))
                 break
         return " "
+
     cleaned = QTY_TOKEN_REGEX.sub(repl, text)
     return cleaned, qty
+
 
 def strip_price(text: str) -> str:
     return PRICE_REGEX.sub(" ", text)
 
-def _tokens(s: str) -> List[str]:
-    return [w for w in re.split(r"[^a-z0-9]+", s.lower()) if w]
-
-def tokens_have_hint(tokens: List[str]) -> bool:
-    if not tokens:
-        return False
-    joined = " ".join(tokens)
-    for h in HOUSEHOLD_HINTS:
-        if h in joined:
-            return True
-    for f in FOOD_HINTS:
-        if f in joined:
-            return True
-    last = tokens[-1]
-    if len(last) >= 4 and (last.endswith("s") or last in {"bread","chicken","beef","pork","fish"}):
-        return True
-    return False
-
-def looks_like_item(cleaned: str) -> bool:
-    t = cleaned.strip().lower()
-    if not t:
-        return False
-    if sum(c.isalpha() for c in t) < 3:
-        return False
-    toks = _tokens(t)
-    if not tokens_have_hint(toks):
-        return False
-    if re.fullmatch(r"[a-z]{0,2}\d{4,}", t):
-        return False
-    return True
 
 def categorize_item(name: str) -> str:
-    t = name.lower()
+    t = (name or "").lower()
     for h in HOUSEHOLD_HINTS:
         if h in t:
             return "Household"
     return "Food"
+
+
+def looks_like_item(raw_or_cleaned: str) -> bool:
+    """
+    Make this permissive so we stop losing real items:
+    - must have letters
+    - not noise
+    - not super short
+    """
+    t = (raw_or_cleaned or "").strip()
+    if len(t) < 3:
+        return False
+    if is_noise_line(t):
+        return False
+    if not re.search(r"[A-Za-z]", t):
+        return False
+    # Avoid weird single-token mega-strings
+    if len(t) > 64 and " " not in t:
+        return False
+    return True
+
+
+def _merge_name_and_price_lines(lines: List[str]) -> List[str]:
+    merged: List[str] = []
+    i = 0
+    while i < len(lines):
+        cur = (lines[i] or "").strip()
+        nxt = (lines[i + 1] or "").strip() if i + 1 < len(lines) else ""
+        if cur and nxt:
+            # merge item line with next price-only line
+            if re.search(r"[A-Za-z]", cur) and PRICE_ONLY_LINE_RE.match(nxt):
+                merged.append(f"{cur} {nxt}".strip())
+                i += 2
+                continue
+        merged.append(cur)
+        i += 1
+    return merged
+
 
 # ---------------- GOOGLE VISION OCR HELPERS ----------------
 
@@ -303,47 +358,97 @@ def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
         print("Vision client not available, returning [].")
         return []
 
-    image = vision.Image(content=jpeg_bytes)
-    response = _vision_client.text_detection(image=image)
+    try:
+        image = vision.Image(content=jpeg_bytes)
+        response = _vision_client.text_detection(image=image)
 
-    if response.error.message:
-        print("Vision API error:", response.error.message)
+        if getattr(response, "error", None) and response.error.message:
+            print("Vision API error:", response.error.message)
+            return []
+
+        full_text = (response.full_text_annotation.text or "") if response.full_text_annotation else ""
+        lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
+        return lines
+    except Exception as e:
+        print("Vision OCR failed:", e)
         return []
 
-    full_text = response.full_text_annotation.text or ""
-    lines = [ln.strip() for ln in full_text.splitlines()]
-    return lines
 
-def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
+def parse_lines_to_items(
+    request: Request,
+    lines: List[str],
+    debug: bool = False
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Take OCR text lines, clean them, group duplicates, guess qty/category/image.
+    If debug=True, also returns dropped/kept diagnostics.
     """
-    items: Dict[str, Dict[str, object]] = {}
+    # Clean + merge
+    raw_lines = [l.strip() for l in lines if (l or "").strip()]
+    raw_lines = _merge_name_and_price_lines(raw_lines)
 
-    for raw in lines:
-        raw = (raw or "").strip()
-        if not raw:
+    items: Dict[str, Dict[str, Any]] = {}
+    dropped: List[Dict[str, Any]] = []
+    kept: List[Dict[str, Any]] = []
+
+    for raw in raw_lines:
+        raw0 = (raw or "").strip()
+        if not raw0:
+            if debug:
+                dropped.append({"line": raw, "stage": "empty", "reason": "blank"})
             continue
 
-        if is_noise_line(raw):
+        if is_noise_line(raw0):
+            if debug:
+                dropped.append({"line": raw0, "stage": "is_noise_line", "reason": "matched_noise"})
             continue
 
-        without_price = strip_price(raw)
-        without_price, qty = extract_qty(without_price)
-        norm = normalize(without_price)
+        # remove obvious prices
+        without_price = strip_price(raw0)
+        without_price2, qty = extract_qty(without_price)
 
-        if not looks_like_item(norm):
+        norm = normalize(without_price2)
+
+        # IMPORTANT: check item-likeness on the raw-ish line too, not only hint tokens
+        if not looks_like_item(raw0) and not looks_like_item(norm):
+            if debug:
+                dropped.append({
+                    "line": raw0,
+                    "stage": "looks_like_item",
+                    "reason": "failed_permissive_check",
+                    "without_price": without_price,
+                    "without_price_qty_stripped": without_price2,
+                    "normalized": norm,
+                    "qty": qty,
+                })
             continue
 
-        display = canonical_name(norm)
+        display = canonical_name(norm if norm else without_price2)
+        if not display or len(display) < 3:
+            if debug:
+                dropped.append({"line": raw0, "stage": "canonical_name", "reason": "empty_display"})
+            continue
+
         category = categorize_item(display)
         key = display.lower()
 
-        # choose image url for the app
         img_url = guess_branded_image_url(
-            original_line=raw,
+            request=request,
+            original_line=raw0,
             cleaned_display_name=display
         )
+
+        if debug:
+            kept.append({
+                "line": raw0,
+                "without_price": without_price,
+                "without_price_qty_stripped": without_price2,
+                "normalized": norm,
+                "display": display,
+                "qty": qty,
+                "category": category,
+                "image_url": img_url,
+            })
 
         if key in items:
             items[key]["quantity"] = int(items[key]["quantity"]) + qty
@@ -355,7 +460,19 @@ def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
                 "image_url": img_url,
             }
 
-    return list(items.values())
+    if not debug:
+        return list(items.values()), None
+
+    dbg = {
+        "line_count_in": len(lines),
+        "line_count_after_merge": len(raw_lines),
+        "kept_count": len(kept),
+        "dropped_count": len(dropped),
+        "kept": kept[:250],
+        "dropped": dropped[:400],
+    }
+    return list(items.values()), dbg
+
 
 # ===================== API ROUTES =====================
 
@@ -363,13 +480,20 @@ def parse_lines_to_items(lines: List[str]) -> List[Dict[str, object]]:
 def health():
     return {"status": "ok"}
 
+
 @app.post("/parse-receipt")
-async def parse_receipt(file: UploadFile = File(...)):
+async def parse_receipt(
+    request: Request,
+    file: UploadFile = File(...),
+    debug: bool = Query(False),
+):
     """
     1. Read the uploaded image (JPEG basically).
     2. Run Google Vision OCR to get all text lines.
     3. Parse those lines into structured items.
     4. Return items to the iOS app.
+
+    If debug=true, also return drop reasons and transformations.
     """
     jpeg_bytes = await file.read()
 
@@ -377,7 +501,7 @@ async def parse_receipt(file: UploadFile = File(...)):
     try:
         pil_img = Image.open(io.BytesIO(jpeg_bytes)).convert("L")
         pil_img = ImageOps.autocontrast(pil_img)
-        pil_img = pil_img.filter(ImageFilter.SHARPEN) if hasattr(Image, "filter") else pil_img
+        pil_img = pil_img.filter(ImageFilter.SHARPEN)
         buf = io.BytesIO()
         pil_img.save(buf, format="JPEG", quality=90)
         processed_bytes = buf.getvalue()
@@ -386,20 +510,27 @@ async def parse_receipt(file: UploadFile = File(...)):
         processed_bytes = jpeg_bytes
 
     # OCR via Google Vision
-    lines = run_google_vision_ocr(processed_bytes)
+    ocr_lines = run_google_vision_ocr(processed_bytes)
 
     # Parse lines -> items
-    items_list = parse_lines_to_items(lines)
+    items_list, dbg = parse_lines_to_items(request, ocr_lines, debug=debug)
 
-    return JSONResponse(items_list)
+    if not debug:
+        return JSONResponse(items_list)
+
+    return JSONResponse({
+        "items": items_list,
+        "debug": dbg,
+        "ocr_line_count": len(ocr_lines),
+        "ocr_text_preview": "\n".join(ocr_lines[:80]),
+    })
+
 
 # ===================== IMAGE DELIVERY =====================
 
-# in-memory cache: product key -> final bytes
 _IMAGE_CACHE: Dict[str, bytes] = {}
 
-# manual brand-ish fallbacks
-PRODUCT_IMAGE_MAP = {
+PRODUCT_IMAGE_MAP: Dict[str, str] = {
     "parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
     "mozzarella cheese": "https://images.unsplash.com/photo-1600166898747-96f2ef749acd?w=512&q=80",
     "cheddar cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
@@ -429,8 +560,8 @@ PRODUCT_IMAGE_MAP = {
 
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
+
 async def fetch_bytes(url: str) -> Optional[bytes]:
-    """Download bytes from a URL (jpg/png/etc). Safe-wrapped."""
     try:
         async with httpx.AsyncClient(
             timeout=10.0,
@@ -439,13 +570,14 @@ async def fetch_bytes(url: str) -> Optional[bytes]:
         ) as client:
             r = await client.get(url)
         r.raise_for_status()
-        ctype = r.headers.get("Content-Type", "").lower()
+        ctype = (r.headers.get("Content-Type") or "").lower()
         if "image" not in ctype:
             return None
         return r.content
     except Exception as e:
         print("fetch_bytes error:", e)
         return None
+
 
 @app.get("/image")
 async def get_product_image(name: str = Query(..., description="product name to fetch image for")):
@@ -458,20 +590,17 @@ async def get_product_image(name: str = Query(..., description="product name to 
     """
     key = _canonical_lookup_key(name)
 
-    # 1. cache hit
     if key in _IMAGE_CACHE:
+        # could be jpg or png; this keeps behavior simple/stable
         return Response(content=_IMAGE_CACHE[key], media_type="image/jpeg")
 
-    # 2. pick a URL from our curated map (or fallback)
     img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
-
-    # 3. try to download that URL
     img_bytes = await fetch_bytes(img_url)
     if img_bytes:
         _IMAGE_CACHE[key] = img_bytes
         return Response(content=img_bytes, media_type="image/jpeg")
 
-    # 4. last resort: 1x1 transparent PNG so the UI always gets something
+    # 1x1 transparent PNG fallback
     TINY_PNG_BASE64 = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
         "ASsJTYQAAAAASUVORK5CYII="
