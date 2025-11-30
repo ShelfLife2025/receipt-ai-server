@@ -96,38 +96,55 @@ CODEY_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+# Expand common receipt abbreviations (safe, grocery-oriented).
+# Add more here as you see new patterns.
 TOKEN_MAP = {
-    "parm": "parmesan", "parma": "parmesan", "parmesan": "parmesan",
-    "ches": "cheese", "chz": "cheese", "cheez": "cheese",
+    # cheese / dairy
+    "parm": "parmesan",
+    "parma": "parmesan",
+    "ches": "cheese",
+    "chz": "cheese",
     "mozz": "mozzarella",
-    "snk": "snack",
-    "crkr": "crackers", "crkrs": "crackers",
-    "grnd": "ground", "org": "organic", "bn": "bean", "bns": "beans",
-    "chk": "chicken", "brst": "breast",
-    "grlc": "garlic", "grl": "garlic", "tmt": "tomato", "toma": "tomato", "spn": "spinach",
-    "strwb": "strawberry",
-    "wtr": "water", "blk": "black", "whl": "whole"
+    "mzz": "mozzarella",
+    "cr": "cracker",
+    "crkr": "crackers",
+    "crkrs": "crackers",
+    "chs": "cheese",
+    "crm": "cream",
+    "whp": "whipping",
+    "hvy": "heavy",
+
+    # produce / pantry
+    "org": "organic",
+    "grnd": "ground",
+    "grlc": "garlic",
+    "tmt": "tomato",
+    "spn": "spinach",
+    "bn": "bean",
+    "bns": "beans",
+
+    # meats
+    "chk": "chicken",
+    "brst": "breast",
+    "rst": "roasted",
+    "ov": "oven",
+
+    # store-ish / OCR weirdness
+    "pbx": "publix",     # often shows up as "Pbx ..."
+    "sh": "sharp",       # "Sh Chd" -> sharp cheddar
+    "chd": "cheddar",
+    "cut": "cuts",
+    "pke": "pike",       # if needed (rare)
+    "nesp": "nespresso", # if needed
+
+    # beverage
+    "dr": "dr",
 }
 
 HOUSEHOLD_HINTS = {
     "detergent", "laundry", "pods", "dish", "dishwashing", "soap", "bleach", "cleaner",
     "toilet", "bath tissue", "paper towel", "paper towels", "towel",
     "wipes", "disinfecting", "foil", "baggies", "bags", "trash", "liners", "sponges"
-}
-
-FOOD_HINTS = {
-    "cheese", "parmesan", "mozzarella", "cheddar", "milk", "yogurt", "butter", "cream",
-    "eggs", "bread", "loaf", "bagel", "tortilla", "pasta", "spaghetti", "macaroni", "noodles",
-    "rice", "cereal", "oatmeal", "granola", "cracker", "crackers", "chips", "snack", "cookies",
-    "tomato", "tomatoes", "lettuce", "spinach", "greens", "kale", "broccoli", "carrot", "onion",
-    "garlic", "pepper", "cucumber", "apple", "banana", "strawberry", "berries", "lemon", "lime",
-    "orange", "grapes", "avocado", "potato", "sweet potato", "mushroom",
-    "chicken", "beef", "pork", "turkey", "sausage", "bacon", "ham",
-    "fish", "salmon", "tuna", "shrimp",
-    "hummus", "salsa", "guacamole", "ketchup", "mustard", "mayo", "mayonnaise", "pesto",
-    "yoghurt", "coffee", "tea", "juice", "water", "soda", "sparkling", "broth", "stock",
-    "flour", "sugar", "salt", "pepper", "spice", "seasoning", "oil", "olive oil", "vinegar",
-    "ice cream", "frozen", "pizza", "waffle", "pancake", "waffles", "pancakes"
 }
 
 PRICE_REGEX = re.compile(r"\$?\d+\.\d{2}")
@@ -138,95 +155,246 @@ QTY_TOKEN_REGEX = re.compile(
 )
 
 # Publix often OCRs item then price-only line under it (ex: "ORG BEA" then "5.29 E")
-PRICE_ONLY_LINE_RE = re.compile(r"^\s*\$?\d{1,4}\.\d{2}\s*[A-Za-z]?\s*$")
-TRAILING_PRICE_RE = re.compile(r"(\$?\d{1,4}\.\d{2})\s*$")
+PRICE_ONLY_LINE_RE = re.compile(r"^\s*\$?\d{1,6}\.\d{2}\s*[A-Za-z]?\s*$")
+TRAILING_PRICE_RE = re.compile(r"(\$?\d{1,6}\.\d{2})\s*$")
 TRAILING_LONG_CODE_RE = re.compile(r"\b\d{4,}\b$")
 
-# ✅ UPDATED NOISE_PATTERNS (your old list + new header/address/promo/price-flag filters)
+# ===================== Noise / Quality Gates =====================
+
+STATE_ABBR = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME",
+    "MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA",
+    "RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"
+}
+
 NOISE_PATTERNS = [
-    # --- NEW: store header + address-ish lines (stop these becoming items) ---
-    r"^\s*publix\b",  # "Publix" / "Publix."
-    r"\bshopping\s+center\b",  # "Hollieanna shopping center"
-    # street address with multiple words before suffix ("741 south orlando avenue")
-    r"^\s*\d{1,6}\s+[a-z0-9\s]+\b(ave|avenue|st|street|rd|road|blvd|boulevard|drive|dr|ln|lane|pkwy|parkway|hwy|highway)\b",
-    r"^\s*[a-z\s]+,\s*[a-z]{2}\s*$",  # "Winter Park, FL"
-    r"^\s*[a-z\s]+\s+[a-z]{2}\s*$",   # "Winter Park FL"
-    r"^\s*[a-z\s]+\s+[a-z]{2}\s+\d{5}(-\d{4})?\s*$",  # "City ST 12345"
-    r"^\s*promotion\b",
-    # price+flag lines like "13.99 F" / "3.79 E" that OCR produces under items
-    r"^\s*\$?\d{1,6}([.,]\d{2})?\s*[a-z]\s*$",
-
-    # --- existing patterns ---
-    r"^apply\b", r"jobs\b", r"publix\.?jobs", r"\bcareer\b",
-    r"^payment", r"^entry\s+method", r"^you\s?saved\b", r"^savings\b",
-    r"^acct[:# ]", r"^account\b", r"^trace[:# ]", r"\bapproval\b", r"\bauth\b",
-    r"\bsubtotal\b", r"\bsub\s*total\b", r"\btax\b", r"\btotal\b", r"\bchange\b", r"\bbalance\b",
-    r"\bdebit\b", r"\bcredit\b", r"\bvisa\b", r"\bmastercard\b", r"\bdiscover\b", r"\bamex\b",
-    r"\bthank you\b|\bthanks\b", r"\bcashier\b|\bmanager\b|\bstore\b\s*#",
-    r"\bpresto!?$", r"\bpresto!\b", r"\bplaza\b|\bmall\b|\bmillenia\b",
-    r"https?://", r"\bwww\.", r"@[A-Za-z0-9_]+",
+    # obvious receipt non-items
+    r"\bthank you\b|\bthanks\b",
+    r"\bapply\b|\bjobs\b|publix\.?jobs|\bcareer\b",
+    r"\bsubtotal\b|\bsub\s*total\b|\btax\b|\btotal\b|\bbalance\b|\bamount due\b|\bchange\b",
+    r"\bpayment\b|\bpaid\b|\bdebit\b|\bcredit\b|\bvisa\b|\bmastercard\b|\bdiscover\b|\bamex\b",
+    r"\bauth\b|\bapproval\b|\bref\b|\btrace\b|\bacct\b|\baccount\b",
+    r"\bcontactless\b|\btap\b|\bchip\b",
+    r"\bcashier\b|\bregister\b|\bterminal\b|\bpos\b|\bmerchant\b",
+    r"\bpromo\b|\bpromotion\b|\bdiscount\b|\bsavings\b|\byou\s?saved\b|\bcoupon\b",
+    r"https?://|\bwww\.",
+    # phone numbers
     r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
-    r"\b\d{1,4}\s+[A-Za-z0-9]+\s+(ave|avenue|st|street|rd|road|blvd|drive|dr)\b",
-    r"\btrace\s*#?:?\s*\d+\b", r"\bacct\s*#?:?\s*\w+\b",
-    r"\bcontactless\b|\btap\b|\bchip\b", r"\bmerchant\b|\bterminal\b|\bpos\b",
-    r"\bgrocery\s?item\b$",
+    # address-ish
+    r"^\s*\d{1,6}\s+[a-z0-9\s]+\b(ave|avenue|st|street|rd|road|blvd|boulevard|drive|dr|ln|lane|pkwy|parkway|hwy|highway)\b",
+    r"\bshopping\s+center\b|\bplaza\b|\bmall\b",
+    # “price + flag” lines
+    r"^\s*\$?\d{1,6}([.,]\d{2})?\s*[a-z]\s*$",
 ]
-
-# ===================== Canonical helpers =====================
-
-def canonical_name(name: str) -> str:
-    t = (name or "").strip().lower()
-    if "parmesan" in t and "cheese" in t:
-        return "Parmesan cheese"
-    if "mozzarella" in t and "cheese" in t:
-        return "Mozzarella cheese"
-    if "cheddar" in t and "cheese" in t:
-        return "Cheddar cheese"
-    if "cracker" in t:
-        return "Crackers"
-    if "bread" in t:
-        return "Bread"
-    if "yogurt" in t:
-        return "Yogurt"
-    if "hummus" in t:
-        return "Hummus"
-    if "ketchup" in t:
-        return "Ketchup"
-    if "spinach" in t:
-        return "Spinach"
-    if "tomato" in t:
-        return "Tomatoes"
-    if "garlic" in t:
-        return "Garlic"
-    if "detergent" in t and "pod" in t:
-        return "Laundry pods"
-    if "detergent" in t:
-        return "Laundry detergent"
-    if "dish" in t and "soap" in t:
-        return "Dish soap"
-    if "paper" in t and "towel" in t:
-        return "Paper towels"
-    if "toilet" in t or "bath tissue" in t:
-        return "Toilet paper"
-    if "wipe" in t:
-        return "Wipes"
-    return t[:1].upper() + t[1:] if t else ""
-
-
-def _canonical_lookup_key(raw_name: str) -> str:
-    return canonical_name(raw_name).strip().lower()
-
 
 def _base_url(request: Request) -> str:
     if PUBLIC_BASE_URL:
         return PUBLIC_BASE_URL
     return str(request.base_url).rstrip("/")
 
-
 def guess_image_url(request: Request, display_name: str) -> str:
     encoded = urllib.parse.quote((display_name or "").strip())
     return f"{_base_url(request)}/image?name={encoded}"
 
+def _looks_like_location(s: str) -> bool:
+    # City ST, City ST ZIP, etc.
+    t = (s or "").strip()
+    if not t:
+        return False
+    # e.g. "Winter Park, FL"
+    if re.fullmatch(r"[A-Za-z .'-]+,\s*[A-Za-z]{2}\s*", t):
+        return True
+    parts = t.split()
+    if len(parts) >= 2 and parts[-1].upper() in STATE_ABBR:
+        return True
+    if re.search(r"\b[A-Z]{2}\s*\d{5}(-\d{4})?\b", t):
+        return True
+    return False
+
+def _strip_money_and_codes(s: str) -> str:
+    s = PRICE_REGEX.sub(" ", s)
+    s = re.sub(r"@\s*\d+(\.\d{2})?\b", " ", s)
+    s = CODEY_REGEX.sub(" ", s)
+    s = TRAILING_PRICE_RE.sub("", s).strip()
+    s = TRAILING_LONG_CODE_RE.sub("", s).strip()
+    return re.sub(r"\s+", " ", s).strip()
+
+def _drop_trailing_flag_tokens(s: str) -> str:
+    # Publix often has trailing single letters like F/H/E after price lines
+    s = (s or "").strip()
+    s = re.sub(r"\s+[A-Za-z]\b$", "", s).strip()
+    # sometimes multiple flags: " ... F E"
+    s = re.sub(r"(\s+[A-Za-z]\b)+$", "", s).strip()
+    return s
+
+def _is_two_letter_garbage(s: str) -> bool:
+    t = re.sub(r"[^A-Za-z ]+", " ", (s or ""))
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t:
+        return True
+    toks = t.split()
+    # Allow “Dr” (Dr Pepper)
+    allow = {"dr"}
+    if all((len(x) <= 2 and x.lower() not in allow) for x in toks) and len(toks) <= 3:
+        return True
+    return False
+
+def is_noise_line(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return True
+
+    low = t.lower()
+    if _looks_like_location(t):
+        return True
+
+    for pat in NOISE_PATTERNS:
+        if re.search(pat, low):
+            return True
+
+    # if the line is basically only numbers/prices
+    letters = sum(c.isalpha() for c in t)
+    digits = sum(c.isdigit() for c in t)
+    if letters == 0 and digits > 0:
+        return True
+
+    # kill "TF", "FF", "LB LB", etc
+    cleaned = _drop_trailing_flag_tokens(_strip_money_and_codes(t))
+    if _is_two_letter_garbage(cleaned):
+        return True
+
+    return False
+
+def normalize(text: str) -> str:
+    """
+    Goal:
+    - remove prices, codes, sizes
+    - expand common abbreviations
+    - remove trailing flag letters (F/H/E/etc)
+    - keep meaningful multi-word names
+    """
+    t = (text or "").strip().lower()
+    t = t.replace("&", " and ")
+
+    t = _strip_money_and_codes(t)
+    t = _drop_trailing_flag_tokens(t)
+
+    # remove brands as "noise" for canonical comparison (we still keep them in display where possible)
+    for bw in BRAND_WORDS:
+        t = re.sub(rf"\b{re.escape(bw)}\b", " ", t, flags=re.IGNORECASE)
+
+    t = SIZE_REGEX.sub(" ", t)
+
+    words: List[str] = []
+    for w in re.split(r"[^a-z0-9']+", t):
+        if not w:
+            continue
+        w2 = TOKEN_MAP.get(w, w)
+        # drop lone flag letters anywhere
+        if len(w2) == 1 and w2.isalpha():
+            continue
+        words.append(w2)
+
+    out = " ".join(words)
+    out = re.sub(r"\s+", " ", out).strip()
+
+    # final trailing clean
+    out = _drop_trailing_flag_tokens(out)
+    return out
+
+def title_case(s: str) -> str:
+    small = {"and", "or", "the", "of", "a", "an", "with", "in", "to"}
+    # preserve some brand punctuation
+    special = {
+        "raos": "Rao's",
+        "dr": "Dr",
+        "mac": "Mac",
+    }
+    parts = (s or "").split()
+    out: List[str] = []
+    for i, p in enumerate(parts):
+        core = p.strip()
+        low = core.lower().strip("'")
+        if low in special:
+            out.append(special[low])
+            continue
+        if i > 0 and low in small:
+            out.append(low)
+        else:
+            out.append(low[:1].upper() + low[1:])
+    return " ".join(out).strip()
+
+def extract_qty(text: str) -> Tuple[str, int]:
+    qty = 1
+
+    def repl(m: re.Match) -> str:
+        nonlocal qty
+        for g in m.groups():
+            if g and g.isdigit():
+                qty = max(qty, int(g))
+                break
+        return " "
+
+    cleaned = QTY_TOKEN_REGEX.sub(repl, text)
+    return cleaned, qty
+
+def looks_like_item(raw: str, normalized: str) -> bool:
+    """
+    We want to keep real items, but drop junk.
+    Rules:
+    - not noise
+    - must contain at least one 3+ letter chunk after cleaning
+    - reject mostly 1–2 letter tokens
+    """
+    if is_noise_line(raw):
+        return False
+
+    cand = normalized.strip()
+    if not cand:
+        return False
+
+    if _is_two_letter_garbage(cand):
+        return False
+
+    # must contain a real word (3+ letters)
+    if not re.search(r"[a-zA-Z]{3,}", cand):
+        return False
+
+    return True
+
+def categorize_item(name: str) -> str:
+    t = (name or "").lower()
+    for h in HOUSEHOLD_HINTS:
+        if h in t:
+            return "Household"
+    return "Food"
+
+def canonical_key(name: str) -> str:
+    """
+    Strong dedupe key:
+    - lowercase
+    - remove punctuation/spaces
+    - remove trailing flag letters
+    """
+    n = (name or "").lower()
+    n = _drop_trailing_flag_tokens(n)
+    n = re.sub(r"[^a-z0-9]+", "", n)
+    return n
+
+def _merge_name_and_price_lines(lines: List[str]) -> List[str]:
+    merged: List[str] = []
+    i = 0
+    while i < len(lines):
+        cur = (lines[i] or "").strip()
+        nxt = (lines[i + 1] or "").strip() if i + 1 < len(lines) else ""
+        if cur and nxt:
+            if re.search(r"[A-Za-z]", cur) and PRICE_ONLY_LINE_RE.match(nxt):
+                merged.append(f"{cur} {nxt}".strip())
+                i += 2
+                continue
+        merged.append(cur)
+        i += 1
+    return merged
 
 def guess_branded_image_url(request: Request, original_line: str, cleaned_display_name: str) -> str:
     """
@@ -251,111 +419,6 @@ def guess_branded_image_url(request: Request, original_line: str, cleaned_displa
             return url
 
     return guess_image_url(request, cleaned_display_name)
-
-# ===================== Parsing helpers =====================
-
-def is_noise_line(text: str) -> bool:
-    t = (text or "").strip().lower()
-    if not t or len(t) < 3:
-        return True
-    for pat in NOISE_PATTERNS:
-        if re.search(pat, t):
-            return True
-
-    # price-only / mostly numeric lines = noise
-    letters = sum(c.isalpha() for c in t)
-    digits = sum(c.isdigit() for c in t)
-    if letters == 0 and digits > 0:
-        return True
-
-    return False
-
-
-def normalize(text: str) -> str:
-    t = (text or "").lower()
-    t = t.replace("&", " and ")
-
-    for bw in BRAND_WORDS:
-        t = re.sub(rf"\b{re.escape(bw)}\b", " ", t, flags=re.IGNORECASE)
-
-    t = SIZE_REGEX.sub(" ", t)
-    t = CODEY_REGEX.sub(" ", t)
-
-    words: List[str] = []
-    for w in re.split(r"[^a-z0-9]+", t):
-        if not w:
-            continue
-        words.append(TOKEN_MAP.get(w, w))
-
-    t = " ".join(words)
-    t = re.sub(r"\s+", " ", t).strip()
-
-    # strip trailing price/codes that sneak through OCR merges
-    t = TRAILING_PRICE_RE.sub("", t).strip()
-    t = TRAILING_LONG_CODE_RE.sub("", t).strip()
-    return t
-
-
-def extract_qty(text: str) -> Tuple[str, int]:
-    qty = 1
-
-    def repl(m: re.Match) -> str:
-        nonlocal qty
-        for g in m.groups():
-            if g and g.isdigit():
-                qty = max(qty, int(g))
-                break
-        return " "
-
-    cleaned = QTY_TOKEN_REGEX.sub(repl, text)
-    return cleaned, qty
-
-
-def strip_price(text: str) -> str:
-    return PRICE_REGEX.sub(" ", text)
-
-
-def categorize_item(name: str) -> str:
-    t = (name or "").lower()
-    for h in HOUSEHOLD_HINTS:
-        if h in t:
-            return "Household"
-    return "Food"
-
-
-def looks_like_item(raw_or_cleaned: str) -> bool:
-    """
-    Permissive so we stop losing real items:
-    - must have letters
-    - not noise
-    - not super short
-    """
-    t = (raw_or_cleaned or "").strip()
-    if len(t) < 3:
-        return False
-    if is_noise_line(t):
-        return False
-    if not re.search(r"[A-Za-z]", t):
-        return False
-    if len(t) > 64 and " " not in t:
-        return False
-    return True
-
-
-def _merge_name_and_price_lines(lines: List[str]) -> List[str]:
-    merged: List[str] = []
-    i = 0
-    while i < len(lines):
-        cur = (lines[i] or "").strip()
-        nxt = (lines[i + 1] or "").strip() if i + 1 < len(lines) else ""
-        if cur and nxt:
-            if re.search(r"[A-Za-z]", cur) and PRICE_ONLY_LINE_RE.match(nxt):
-                merged.append(f"{cur} {nxt}".strip())
-                i += 2
-                continue
-        merged.append(cur)
-        i += 1
-    return merged
 
 # ---------------- GOOGLE VISION OCR HELPERS ----------------
 
@@ -383,7 +446,6 @@ def run_google_vision_ocr(jpeg_bytes: bytes) -> List[str]:
         print("Vision OCR failed:", e)
         return []
 
-
 def parse_lines_to_items(
     request: Request,
     lines: List[str],
@@ -407,53 +469,57 @@ def parse_lines_to_items(
                 dropped.append({"line": raw, "stage": "empty", "reason": "blank"})
             continue
 
+        # hard noise gate
         if is_noise_line(raw0):
             if debug:
-                dropped.append({"line": raw0, "stage": "is_noise_line", "reason": "matched_noise"})
+                dropped.append({"line": raw0, "stage": "is_noise_line", "reason": "noise"})
             continue
 
-        without_price = strip_price(raw0)
-        without_price2, qty = extract_qty(without_price)
+        # remove prices + qty tokens early
+        no_price = PRICE_REGEX.sub(" ", raw0)
+        no_price = _drop_trailing_flag_tokens(no_price)
+        no_price2, qty = extract_qty(no_price)
 
-        norm = normalize(without_price2)
+        norm = normalize(no_price2)
 
-        if not looks_like_item(raw0) and not looks_like_item(norm):
+        if not looks_like_item(raw0, norm):
             if debug:
                 dropped.append({
                     "line": raw0,
                     "stage": "looks_like_item",
-                    "reason": "failed_permissive_check",
-                    "without_price": without_price,
-                    "without_price_qty_stripped": without_price2,
+                    "reason": "failed_quality",
+                    "no_price": no_price,
+                    "no_price_qty_stripped": no_price2,
                     "normalized": norm,
                     "qty": qty,
                 })
             continue
 
-        display = canonical_name(norm if norm else without_price2)
+        display = title_case(norm)
         if not display or len(display) < 3:
             if debug:
-                dropped.append({"line": raw0, "stage": "canonical_name", "reason": "empty_display"})
+                dropped.append({"line": raw0, "stage": "display", "reason": "empty_display"})
             continue
 
         category = categorize_item(display)
-        key = display.lower()
+        img_url = guess_branded_image_url(request=request, original_line=raw0, cleaned_display_name=display)
 
-        img_url = guess_branded_image_url(
-            request=request,
-            original_line=raw0,
-            cleaned_display_name=display
-        )
+        key = canonical_key(display)
+        if not key:
+            if debug:
+                dropped.append({"line": raw0, "stage": "dedupe_key", "reason": "empty_key"})
+            continue
 
         if debug:
             kept.append({
                 "line": raw0,
-                "without_price": without_price,
-                "without_price_qty_stripped": without_price2,
+                "no_price": no_price,
+                "no_price_qty_stripped": no_price2,
                 "normalized": norm,
                 "display": display,
                 "qty": qty,
                 "category": category,
+                "key": key,
                 "image_url": img_url,
             })
 
@@ -475,6 +541,7 @@ def parse_lines_to_items(
         "line_count_after_merge": len(raw_lines),
         "kept_count": len(kept),
         "dropped_count": len(dropped),
+        # NOTE: we only truncate the debug arrays for response size; we do NOT cap items.
         "kept": kept[:250],
         "dropped": dropped[:400],
     }
@@ -485,7 +552,6 @@ def parse_lines_to_items(
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 @app.post("/parse-receipt")
 async def parse_receipt(
@@ -551,8 +617,8 @@ PRODUCT_IMAGE_MAP: Dict[str, str] = {
     "grapes": "https://images.unsplash.com/photo-1601004890211-3f3d02dd3c10?w=512&q=80",
 
     "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
-    "panera mac & cheese": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
-    "rao's marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
+    "panera mac and cheese": "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80",
+    "raos marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
 
     "paper towels": "https://images.unsplash.com/photo-1581579186981-5f3f0c612e75?w=512&q=80",
     "toilet paper": "https://images.unsplash.com/photo-1584559582151-fb1dfa8b33a5?w=512&q=80",
@@ -593,10 +659,9 @@ async def get_product_image(name: str = Query(..., description="product name to 
     3. Otherwise, try PRODUCT_IMAGE_MAP (Unsplash-ish brand-style photo).
     4. If that fails, return a 1x1 transparent PNG so we never crash.
     """
-    key = _canonical_lookup_key(name)
+    key = (name or "").strip().lower()
 
     if key in _IMAGE_CACHE:
-        # could be jpg or png; this keeps behavior simple/stable
         return Response(content=_IMAGE_CACHE[key], media_type="image/jpeg")
 
     img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
