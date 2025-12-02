@@ -6,6 +6,9 @@ main.py — ShelfLife receipt + image service (Render-ready)
 ✅ /image works (packshot proxy first → fallback map → tiny png)
 ✅ /health for quick checks
 
+NEW ✅ /parse-receipt now RETURNS image_url for each item (so your app can show photos)
+NEW ✅ still filters to ONLY grocery (Food) items
+
 Start command on Render:
 uvicorn main:app --host 0.0.0.0 --port $PORT
 """
@@ -32,14 +35,11 @@ from google.cloud import vision
 app = FastAPI()
 
 # ---------------- GOOGLE VISION SETUP ----------------
-# Render provides GOOGLE_APPLICATION_CREDENTIALS_JSON as an env var (literal JSON).
-# We write it to disk and set GOOGLE_APPLICATION_CREDENTIALS so Vision SDK can read it.
 VISION_TMP_PATH = "/tmp/gcloud_key.json"
 
 
 def _init_google_credentials_file() -> None:
     creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    # If user already set a file path, don't override
     if not creds_json:
         if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
             print("Google creds: using GOOGLE_APPLICATION_CREDENTIALS already set.")
@@ -48,7 +48,6 @@ def _init_google_credentials_file() -> None:
         return
 
     try:
-        # Accept either a raw JSON string or something already JSON-encoded
         parsed = json.loads(creds_json)
         with open(VISION_TMP_PATH, "w", encoding="utf-8") as f:
             json.dump(parsed, f)
@@ -60,28 +59,52 @@ def _init_google_credentials_file() -> None:
 
 _init_google_credentials_file()
 
-
 # ---------------- BASIC HELPERS ----------------
 
 NOISE_PATTERNS = [
-    r"\btotal\b", r"\bsub\s*total\b", r"\btax\b", r"\bbalance\b",
-    r"\bchange\b", r"\bamount\b", r"\bpayment\b", r"\bdebit\b", r"\bcredit\b",
+    # totals/tenders
+    r"\btotal\b", r"\bsub\s*total\b", r"\bsubtotal\b", r"\btax\b", r"\bbalance\b",
+    r"\bchange\b", r"\bamount\b", r"\bamnt\b", r"\btender\b", r"\bcash\b",
+    r"\bpayment\b", r"\bdebit\b", r"\bcredit\b",
     r"\bvisa\b", r"\bmastercard\b", r"\bamex\b", r"\bdiscover\b",
-    r"\baccount\b", r"\bacct\b", r"\btrace\b", r"\bauth\b", r"\bapproval\b",
+    r"\bauth\b", r"\bapproval\b", r"\bapproved\b",
+    r"\bref(?:erence)?\b", r"\btrace\b", r"\btrx\b", r"\btransaction\b", r"\bterminal\b",
+    r"\bcard\b", r"\bchip\b", r"\bpin\b", r"\bsignature\b",
+
+    # store/meta
     r"\bregister\b", r"\bcashier\b", r"\bmanager\b", r"\bstore\b",
-    r"\bthank you\b", r"\bthanks\b", r"\breturn\b", r"\brefund\b",
-    r"\btransaction\b", r"\bterminal\b", r"\bcard\b", r"\bchip\b",
-    r"\bmerchant\b", r"\bpin\b", r"\bsignature\b",
-    r"\bphone\b", r"\bwww\.", r"\.com\b",
-    r"\baddress\b", r"\bcity\b", r"\bst\b", r"\bave\b", r"\broad\b",
-    r"\breceipt\b",
+    r"\breceipt\b", r"\bserved\b", r"\bguest\b", r"\bvisit\b",
+    r"\bmember\b", r"\brewards?\b", r"\bpoints?\b",
+
+    # coupons/discounts
+    r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bsave\b", r"\bsavings\b", r"\byou saved\b",
+    r"\bclub\b", r"\bdeal\b", r"\boff\b",
+
+    # thank-you/footer
+    r"\bthank you\b", r"\bthanks\b", r"\bcome again\b", r"\breturn\b", r"\brefund\b",
+
+    # contact/web
+    r"\bphone\b", r"\btel\b", r"\bwww\.", r"\.com\b",
+
+    # common “items count” footer/header
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 ]
-
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
-# A light household keyword list (tune over time)
+ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
+TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
+DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+ADDR_SUFFIX_RE = re.compile(
+    r"\b(st|ave|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|pkwy|parkway|hwy|highway)\b",
+    re.IGNORECASE,
+)
+STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b")
+
+UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\d+(?:\.\d{1,2})?\b", re.IGNORECASE)
+MONEY_TOKEN_RE = re.compile(r"\$?\d{1,6}(?:\.\d{2})\b")
+PHONEISH_RE = re.compile(r"\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b")
+
 HOUSEHOLD_WORDS = {
     "paper", "towel", "towels", "toilet", "tissue", "napkin", "napkins",
     "detergent", "bleach", "cleaner", "wipes", "wipe", "soap", "dish", "dawn",
@@ -91,9 +114,6 @@ HOUSEHOLD_WORDS = {
     "battery", "batteries", "lightbulb", "lighter", "matches",
     "pet", "litter",
 }
-
-UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\d+(?:\.\d{1,2})?\b", re.IGNORECASE)
-MONEY_RE = re.compile(r"\$?\d+(?:\.\d{1,2})")
 
 
 def dedupe_key(s: str) -> str:
@@ -105,7 +125,6 @@ def dedupe_key(s: str) -> str:
 
 
 def title_case(s: str) -> str:
-    # simple title-case with small-word handling
     small = {"and", "or", "of", "the", "a", "an", "to", "in", "on", "for"}
     words = [w for w in re.split(r"\s+", (s or "").strip()) if w]
     out: list[str] = []
@@ -118,22 +137,45 @@ def title_case(s: str) -> str:
     return " ".join(out).strip()
 
 
+def _is_header_or_address(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return True
+
+    if PHONEISH_RE.search(s):
+        return True
+    if ZIP_RE.search(s):
+        return True
+    if DATE_RE.search(s) or TIME_RE.search(s):
+        return True
+
+    if re.search(r"\b\d{2,6}\b", s) and ADDR_SUFFIX_RE.search(s):
+        return True
+
+    if STATE_RE.search(s):
+        words = re.findall(r"[A-Za-z]+", s)
+        has_money = bool(MONEY_TOKEN_RE.search(s))
+        if 2 <= len(words) <= 6 and not has_money:
+            return True
+
+    return False
+
+
 def _looks_like_item(line: str) -> bool:
     if not line:
         return False
     if NOISE_RE.search(line):
         return False
-
-    # Must have at least one letter
+    if _is_header_or_address(line):
+        return False
     if not re.search(r"[A-Za-z]", line):
         return False
 
-    # Exclude "pure money" lines
-    stripped = re.sub(r"\s+", "", line)
-    if re.fullmatch(r"[$0-9\.,]+", stripped):
+    letters = len(re.findall(r"[A-Za-z]", line))
+    digits = len(re.findall(r"\d", line))
+    if digits >= 6 and letters <= 1:
         return False
 
-    # Avoid very long header-ish lines
     if len(line) > 64:
         return False
 
@@ -143,49 +185,39 @@ def _looks_like_item(line: str) -> bool:
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
 
-    # Remove common trailing price tokens (keep name; quantities handled separately)
-    # Examples: "MILK 3.99" or "MILK $3.99"
-    s = re.sub(r"\s+\$?\d+(?:\.\d{1,2})\s*$", "", s)
+    # remove trailing prices
+    s = re.sub(r"\s+\$?\d+(?:\.\d{2})\s*$", "", s)
 
-    # Remove "3 @ 2.99" patterns (unit price; keep qty parsing separately)
+    # remove unit-price pattern like "2 @ 3.99"
     s = UNIT_PRICE_RE.sub("", s).strip()
 
-    # Remove extraneous symbols
+    # remove repeated trailing money tokens
+    s = re.sub(r"(?:\s+\$?\d+(?:\.\d{2}))+\s*$", "", s).strip()
+
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
 def _parse_quantity(line: str) -> tuple[int, str]:
-    """
-    Returns (quantity, remaining_name).
-    Handles:
-    - "2x MILK", "2 x MILK", "MILK x2"
-    - leading number: "3 BANANAS"
-    - patterns like "3 @ 2.99" (already removed in clean_line; but still handle)
-    """
     s = (line or "").strip()
 
-    # "x2" at end
     m = re.search(r"(.*?)\b[xX]\s*(\d+)\s*$", s)
     if m:
         name = m.group(1).strip()
         qty = int(m.group(2))
         return max(qty, 1), name
 
-    # "2x" at start
     m = re.match(r"^\s*(\d+)\s*[xX]\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
         name = m.group(2).strip()
         return max(qty, 1), name
 
-    # leading integer qty: "3 BANANAS"
     m = re.match(r"^\s*(\d+)\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
         name = m.group(2).strip()
-        # Avoid treating years/receipt numbers as qty
         if 1 <= qty <= 50:
             return qty, name
 
@@ -210,22 +242,31 @@ def _dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             merged[k] = it
         else:
             merged[k]["quantity"] = int(merged[k]["quantity"]) + int(it["quantity"])
-
-            # If either version says Household, keep it Household
             if merged[k].get("category") == "Household" or it.get("category") == "Household":
                 merged[k]["category"] = "Household"
-
-    # stable output
     return sorted(merged.values(), key=lambda x: x["name"].lower())
+
+
+def _public_base_url(request: Request) -> str:
+    """
+    Build a public base URL that works behind Render/reverse proxies.
+    """
+    xf_proto = request.headers.get("x-forwarded-proto")
+    xf_host = request.headers.get("x-forwarded-host")
+    if xf_host:
+        scheme = xf_proto or request.url.scheme or "https"
+        return f"{scheme}://{xf_host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _image_url_for_item(base_url: str, name: str) -> str:
+    qname = urllib.parse.quote((name or "").strip())
+    return f"{base_url}/image?name={qname}"
 
 
 # ---------------- OCR ----------------
 
 def _preprocess_image_bytes(data: bytes) -> bytes:
-    """
-    Small preprocessing to help OCR quality.
-    Returns PNG bytes.
-    """
     img = Image.open(io.BytesIO(data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
     img = ImageOps.grayscale(img)
@@ -244,8 +285,6 @@ def _vision_client() -> vision.ImageAnnotatorClient:
 def ocr_text_google_vision(image_bytes: bytes) -> str:
     client = _vision_client()
     image = vision.Image(content=image_bytes)
-
-    # document_text_detection is usually better for receipts than text_detection
     resp = client.document_text_detection(image=image)
 
     if resp.error and resp.error.message:
@@ -254,7 +293,6 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
     if resp.full_text_annotation and resp.full_text_annotation.text:
         return resp.full_text_annotation.text
 
-    # Fallback
     if resp.text_annotations:
         return resp.text_annotations[0].description or ""
 
@@ -270,9 +308,14 @@ def health() -> dict[str, Any]:
 
 @app.post("/parse-receipt")
 async def parse_receipt(
+    request: Request,
     file: UploadFile = File(...),
     debug: bool = Query(False, description="include debug fields"),
 ):
+    """
+    Returns ONLY grocery items (Food) and includes image_url for each item.
+    Your iOS app can display photos by using AsyncImage(url: item.image_url).
+    """
     raw = await file.read()
     if not raw:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
@@ -283,7 +326,10 @@ async def parse_receipt(
     except Exception as e:
         return JSONResponse(
             status_code=500,
-            content={"error": f"OCR failed: {str(e)}", "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS"},
+            content={
+                "error": f"OCR failed: {str(e)}",
+                "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS",
+            },
         )
 
     lines = [ln.strip() for ln in (text or "").splitlines()]
@@ -300,17 +346,30 @@ async def parse_receipt(
     for ln in kept:
         qty, name = _parse_quantity(ln)
         name = _clean_line(name)
+
         if not name or not re.search(r"[A-Za-z]", name):
             continue
 
-        item = {
-            "name": title_case(name),
-            "quantity": int(qty),
-            "category": _classify(name),
-        }
-        parsed.append(item)
+        category = _classify(name)
+
+        # ✅ ONLY GROCERY ITEMS
+        if category != "Food":
+            continue
+
+        parsed.append(
+            {
+                "name": title_case(name),
+                "quantity": int(qty),
+                "category": category,
+            }
+        )
 
     parsed = _dedupe_and_merge(parsed)
+
+    # ✅ Attach image URLs so the client “has photos” without changing /image
+    base_url = _public_base_url(request)
+    for it in parsed:
+        it["image_url"] = _image_url_for_item(base_url, it["name"])
 
     if debug:
         return {
@@ -318,6 +377,7 @@ async def parse_receipt(
             "raw_line_count": len(lines),
             "kept_line_count": len(kept),
             "kept_lines": kept[:200],
+            "base_url": base_url,
         }
 
     return parsed
@@ -327,16 +387,11 @@ async def parse_receipt(
 
 _IMAGE_CACHE: dict[str, bytes] = {}
 _IMAGE_CONTENT_TYPE_CACHE: dict[str, str] = {}
-
-# optional: avoid memory ballooning on long runs
 _MAX_CACHE_ITEMS = 2000
 
-# ✅ Your Instacart-style packshot proxy (your service)
-# Example: https://shelflife-packshots.onrender.com
 PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
 PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
 
-# Keep your existing fallback map for now (until packshot service is live)
 PRODUCT_IMAGE_MAP: dict[str, str] = {
     "sargento artisan blends parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
     "philadelphia cream cheese": "https://images.unsplash.com/photo-1589301763197-9713a1e1e5c0?w=512&q=80",
@@ -348,7 +403,6 @@ PRODUCT_IMAGE_MAP: dict[str, str] = {
     "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
     "grapes": "https://images.unsplash.com/photo-1601004890211-3f3d02dd3c10?w=512&q=80",
 }
-
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
 
@@ -368,10 +422,6 @@ def _trim_caches_if_needed() -> None:
 
 
 async def fetch_image(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, str] | None:
-    """
-    Fetch image bytes + content-type. Return correct media_type so SwiftUI
-    won’t choke if upstream is PNG/WEBP/etc.
-    """
     try:
         async with httpx.AsyncClient(
             timeout=12.0,
@@ -399,11 +449,10 @@ async def get_product_image(
 ):
     ck = _cache_key(name, upc, product_id)
 
-    # serve from cache
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
         return Response(content=_IMAGE_CACHE[ck], media_type=_IMAGE_CONTENT_TYPE_CACHE[ck])
 
-    # 1) ✅ Try your packshot service first (this becomes “Instacart-crisp”)
+    # 1) Packshot service first
     if PACKSHOT_SERVICE_URL:
         qp: list[str] = []
         if product_id:
@@ -429,7 +478,7 @@ async def get_product_image(
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
 
-    # 2) Fallback to your local map (name-based)
+    # 2) Fallback map
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
 
@@ -452,7 +501,6 @@ async def get_product_image(
     return Response(content=tiny_bytes, media_type="image/png")
 
 
-# Optional: request logging helps when debugging deploys
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
     try:
