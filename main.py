@@ -1,13 +1,13 @@
 """
 main.py — ShelfLife receipt + image service (Render-ready)
 
-✅ Deploy-safe (no missing Dict/Optional/etc.)
-✅ /parse-receipt works (Google Vision OCR)
-✅ /image works (packshot proxy first → fallback map → tiny png)
-✅ /health for quick checks
+ Deploy-safe (no missing Dict/Optional/etc.)
+/parse-receipt works (Google Vision OCR)
+/image works (packshot proxy first → fallback map → tiny png)
+/health for quick checks
 
-NEW ✅ /parse-receipt now RETURNS image_url for each item (so your app can show photos)
-NEW ✅ still filters to ONLY grocery (Food) items
+/parse-receipt now RETURNS image_url for each item (so your app can show photos)
+still filters to ONLY grocery (Food) items
 
 Start command on Render:
 uvicorn main:app --host 0.0.0.0 --port $PORT
