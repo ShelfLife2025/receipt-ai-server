@@ -201,7 +201,36 @@ NOISE_PATTERNS = [
 
     # price+flag-only lines like "13.99 F"
     r"^\s*\$?\d{1,6}([.,]\d{2})?\s*[a-z]\s*$",
+
+    # ultra-common city/location header lines getting through OCR
+    r"^\s*[a-z]+\s+park\s*$",        # e.g., "winter park"
+    r"^\s*[a-z]+\s+beach\s*$",       # e.g., "daytona beach"
+    r"^\s*[a-z]+\s+springs\s*$",     # e.g., "altamonte springs"
 ]
+
+# If we hit these, we stop parsing further lines (receipt footer begins)
+FOOTER_START_PATTERNS = [
+    r"\bsubtotal\b",
+    r"\bsub\s*total\b",
+    r"\btax\b",
+    r"\btotal\b",
+    r"\bchange\b",
+    r"\bbalance\b",
+    r"\bamount\s+due\b",
+    r"\bpayment\b",
+    r"\bentry\s+method\b",
+]
+FOOTER_START_RE = re.compile("|".join(FOOTER_START_PATTERNS), re.IGNORECASE)
+
+# A tiny “hard block” list for location-only lines we never want as items.
+# (These are safe because groceries should never be exactly these phrases.)
+HARD_BLOCK_EXACT = {
+    "winter park",
+    "orlando",
+    "florida",
+    "winter park fl",
+    "orlando fl",
+}
 
 HOUSEHOLD_HINTS = {
     "detergent", "laundry", "pods", "dish", "dishwashing", "soap", "bleach", "cleaner",
@@ -270,6 +299,10 @@ def guess_branded_image_url(request: Request, original_line: str, cleaned_displa
 def is_noise_line(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
+        return True
+
+    # hard exact blocks
+    if t in HARD_BLOCK_EXACT:
         return True
 
     # super short = almost always junk (we’ll allow 3+ through later if meaningful)
@@ -418,11 +451,20 @@ def categorize_item(name: str) -> str:
     return "Food"
 
 
+def _has_price_hint(raw_line: str) -> bool:
+    # Most receipt item lines have a price (even if OCR drops the $).
+    return bool(PRICE_REGEX.search(raw_line or ""))
+
+
 def looks_like_item(display: str, raw_line: str) -> bool:
     d = (display or "").strip()
     r = (raw_line or "").strip().lower()
 
     if not d or len(d) < 4:
+        return False
+
+    # hard exact block after canonicalization too
+    if d.lower() in HARD_BLOCK_EXACT:
         return False
 
     # prevent names/roles slipping through even after cleaning
@@ -436,6 +478,22 @@ def looks_like_item(display: str, raw_line: str) -> bool:
     # avoid extremely short token-y results like "Tf", "Ff"
     if len(d.split()) == 1 and len(d) <= 4:
         return False
+
+    # ✅ IMPORTANT: require a price hint unless it's a strong branded/phrase-known line.
+    # This is what kills random city/address lines like "Winter Park".
+    if not _has_price_hint(raw_line):
+        allow = False
+        rl = (raw_line or "").lower()
+        if any(b in rl for b in BRAND_WORDS):
+            allow = True
+        else:
+            blob = f"{raw_line} {display}"
+            for pat, _ in PHRASE_RULES:
+                if pat.search(blob):
+                    allow = True
+                    break
+        if not allow:
+            return False
 
     return True
 
@@ -496,6 +554,12 @@ def parse_lines_to_items(
             if debug:
                 dropped.append({"line": raw, "stage": "empty", "reason": "blank"})
             continue
+
+        # ✅ Stop once we hit totals/payment/footer area
+        if FOOTER_START_RE.search(raw0):
+            if debug:
+                dropped.append({"line": raw0, "stage": "footer_break", "reason": "footer_start"})
+            break
 
         if is_noise_line(raw0):
             if debug:
