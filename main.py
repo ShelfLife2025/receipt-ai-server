@@ -1,16 +1,16 @@
 """
 main.py — ShelfLife receipt + image service (Render-ready)
 
- Deploy-safe (no missing Dict/Optional/etc.)
-/parse-receipt works (Google Vision OCR)
-/image works (packshot proxy first → fallback map → tiny png)
-/health for quick checks
+✅ Deploy-safe
+✅ /parse-receipt (Google Vision OCR)
+✅ /image (packshot proxy → fallback map → tiny png)
+✅ /health
 
-/parse-receipt now RETURNS image_url for each item (so your app can show photos)
-still filters to ONLY grocery (Food) items
-
-Start command on Render:
-uvicorn main:app --host 0.0.0.0 --port $PORT
+✅ FIXED: aggressively blocks random pulls:
+   - price-only lines like "7.69 F", "9.99 T", "$5.49"
+   - addresses like "741 South Orlando Avenue"
+   - header/footer/store meta
+✅ still filters to ONLY grocery (Food) items
 """
 
 from __future__ import annotations
@@ -28,9 +28,7 @@ from fastapi import FastAPI, File, UploadFile, Query, Request
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, ImageOps, ImageFilter
 
-# Google Vision
 from google.cloud import vision
-
 
 app = FastAPI()
 
@@ -95,15 +93,30 @@ NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECAS
 ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
 DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+PHONEISH_RE = re.compile(r"\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b")
+
+# ✅ Expanded street suffix coverage (your old regex missed “Avenue”, “Street”, etc.)
 ADDR_SUFFIX_RE = re.compile(
-    r"\b(st|ave|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|pkwy|parkway|hwy|highway)\b",
+    r"\b("
+    r"st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|"
+    r"pkwy|parkway|hwy|highway|trl|trail|pl|place|cir|circle|way"
+    r")\b",
     re.IGNORECASE,
 )
+
+# directional words commonly present in addresses
+DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNORECASE)
+
 STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b")
 
 UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\d+(?:\.\d{1,2})?\b", re.IGNORECASE)
 MONEY_TOKEN_RE = re.compile(r"\$?\d{1,6}(?:\.\d{2})\b")
-PHONEISH_RE = re.compile(r"\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b")
+ONLY_MONEYISH_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})?\s*$")
+# ✅ blocks: "7.69 F", "9.99 T", "$5.49 F"
+PRICE_FLAG_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})\s*[A-Za-z]{1,2}\s*$")
+
+# word token that looks like a real item word (>=2 letters)
+REAL_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 
 HOUSEHOLD_WORDS = {
     "paper", "towel", "towels", "toilet", "tissue", "napkin", "napkins",
@@ -149,13 +162,15 @@ def _is_header_or_address(line: str) -> bool:
     if DATE_RE.search(s) or TIME_RE.search(s):
         return True
 
-    if re.search(r"\b\d{2,6}\b", s) and ADDR_SUFFIX_RE.search(s):
+    # ✅ street number + suffix OR street number + direction
+    if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
 
+    # state line like “Winter Park FL”
     if STATE_RE.search(s):
         words = re.findall(r"[A-Za-z]+", s)
         has_money = bool(MONEY_TOKEN_RE.search(s))
-        if 2 <= len(words) <= 6 and not has_money:
+        if 2 <= len(words) <= 10 and not has_money:
             return True
 
     return False
@@ -164,19 +179,34 @@ def _is_header_or_address(line: str) -> bool:
 def _looks_like_item(line: str) -> bool:
     if not line:
         return False
-    if NOISE_RE.search(line):
+
+    s = (line or "").strip()
+
+    # ✅ absolute killers for your screenshots
+    if ONLY_MONEYISH_RE.match(s):
         return False
-    if _is_header_or_address(line):
-        return False
-    if not re.search(r"[A-Za-z]", line):
+    if PRICE_FLAG_RE.match(s):
         return False
 
-    letters = len(re.findall(r"[A-Za-z]", line))
-    digits = len(re.findall(r"\d", line))
-    if digits >= 6 and letters <= 1:
+    # reject any line that is basically just numbers and punctuation
+    letters = len(re.findall(r"[A-Za-z]", s))
+    digits = len(re.findall(r"\d", s))
+    if letters == 0:
+        return False
+    if digits >= 4 and letters <= 2:
         return False
 
-    if len(line) > 64:
+    if NOISE_RE.search(s):
+        return False
+    if _is_header_or_address(s):
+        return False
+
+    # Must contain at least one "real word" (>= 2 letters)
+    if not REAL_WORD_RE.search(s):
+        return False
+
+    # Avoid very long junk lines
+    if len(s) > 64:
         return False
 
     return True
@@ -185,7 +215,7 @@ def _looks_like_item(line: str) -> bool:
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
 
-    # remove trailing prices
+    # remove trailing prices (common)
     s = re.sub(r"\s+\$?\d+(?:\.\d{2})\s*$", "", s)
 
     # remove unit-price pattern like "2 @ 3.99"
@@ -202,18 +232,21 @@ def _clean_line(line: str) -> str:
 def _parse_quantity(line: str) -> tuple[int, str]:
     s = (line or "").strip()
 
+    # trailing xN
     m = re.search(r"(.*?)\b[xX]\s*(\d+)\s*$", s)
     if m:
         name = m.group(1).strip()
         qty = int(m.group(2))
         return max(qty, 1), name
 
+    # leading Nx
     m = re.match(r"^\s*(\d+)\s*[xX]\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
         name = m.group(2).strip()
         return max(qty, 1), name
 
+    # leading quantity
     m = re.match(r"^\s*(\d+)\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
@@ -248,9 +281,6 @@ def _dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _public_base_url(request: Request) -> str:
-    """
-    Build a public base URL that works behind Render/reverse proxies.
-    """
     xf_proto = request.headers.get("x-forwarded-proto")
     xf_host = request.headers.get("x-forwarded-host")
     if xf_host:
@@ -314,7 +344,6 @@ async def parse_receipt(
 ):
     """
     Returns ONLY grocery items (Food) and includes image_url for each item.
-    Your iOS app can display photos by using AsyncImage(url: item.image_url).
     """
     raw = await file.read()
     if not raw:
@@ -337,8 +366,10 @@ async def parse_receipt(
 
     kept: list[str] = []
     for ln in lines:
+        # first-pass filter
         if _looks_like_item(ln):
             cleaned = _clean_line(ln)
+            # second-pass filter after removing prices etc
             if cleaned and _looks_like_item(cleaned):
                 kept.append(cleaned)
 
@@ -347,7 +378,12 @@ async def parse_receipt(
         qty, name = _parse_quantity(ln)
         name = _clean_line(name)
 
-        if not name or not re.search(r"[A-Za-z]", name):
+        # final absolute sanity checks (kills edge cases)
+        if not name or not REAL_WORD_RE.search(name):
+            continue
+        if ONLY_MONEYISH_RE.match(name) or PRICE_FLAG_RE.match(name):
+            continue
+        if _is_header_or_address(name):
             continue
 
         category = _classify(name)
@@ -366,7 +402,6 @@ async def parse_receipt(
 
     parsed = _dedupe_and_merge(parsed)
 
-    # ✅ Attach image URLs so the client “has photos” without changing /image
     base_url = _public_base_url(request)
     for it in parsed:
         it["image_url"] = _image_url_for_item(base_url, it["name"])
