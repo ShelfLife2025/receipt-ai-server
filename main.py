@@ -6,10 +6,11 @@ main.py — ShelfLife receipt + image service (Render-ready)
 ✅ /image (packshot proxy → fallback map → tiny png)
 ✅ /health
 
-✅ FIXED: aggressively blocks random pulls:
-   - price-only lines like "7.69 F", "9.99 T", "$5.49"
-   - addresses like "741 South Orlando Avenue"
-   - header/footer/store meta
+✅ FIXED (final): blocks random pulls HARD
+   - price-only lines like "7.69 F", "$5.49"
+   - weight/unit-only lines like "0.96 LB", "1.23 LBS", "0.69/LB"
+   - short junk tokens like "VOV"
+   - addresses / headers / totals / store meta
 ✅ still filters to ONLY grocery (Food) items
 """
 
@@ -87,6 +88,9 @@ NOISE_PATTERNS = [
     # common “items count” footer/header
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
+
+    # ✅ specific junk token seen in your scans
+    r"\bvov\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
@@ -95,7 +99,6 @@ TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
 DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
 PHONEISH_RE = re.compile(r"\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b")
 
-# ✅ Expanded street suffix coverage (your old regex missed “Avenue”, “Street”, etc.)
 ADDR_SUFFIX_RE = re.compile(
     r"\b("
     r"st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|"
@@ -103,8 +106,6 @@ ADDR_SUFFIX_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-
-# directional words commonly present in addresses
 DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNORECASE)
 
 STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b")
@@ -112,11 +113,31 @@ STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY
 UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\d+(?:\.\d{1,2})?\b", re.IGNORECASE)
 MONEY_TOKEN_RE = re.compile(r"\$?\d{1,6}(?:\.\d{2})\b")
 ONLY_MONEYISH_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})?\s*$")
-# ✅ blocks: "7.69 F", "9.99 T", "$5.49 F"
 PRICE_FLAG_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})\s*[A-Za-z]{1,2}\s*$")
+
+# ✅ weight/unit-only line killers
+WEIGHT_ONLY_RE = re.compile(
+    r"^\s*\$?\d+(?:\.\d+)?\s*(lb|lbs|oz|g|kg|ct)\s*$",
+    re.IGNORECASE,
+)
+PER_UNIT_PRICE_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b",
+    re.IGNORECASE,
+)
 
 # word token that looks like a real item word (>=2 letters)
 REAL_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+
+# ✅ “words” that should NOT count as an item word
+STOP_ITEM_WORDS = {
+    "lb", "lbs", "oz", "g", "kg", "ct", "ea", "each",
+    "w", "wt", "weight",
+    "at", "x",
+    "vov",  # kill it even if OCR varies casing
+}
+
+# ✅ short junk codes: kill if line is ONLY a short token like "VOV"
+SHORT_CODE_ONLY_RE = re.compile(r"^\s*[A-Za-z]{2,5}\s*$")
 
 HOUSEHOLD_WORDS = {
     "paper", "towel", "towels", "toilet", "tissue", "napkin", "napkins",
@@ -162,7 +183,7 @@ def _is_header_or_address(line: str) -> bool:
     if DATE_RE.search(s) or TIME_RE.search(s):
         return True
 
-    # ✅ street number + suffix OR street number + direction
+    # street number + suffix OR street number + direction
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
 
@@ -170,10 +191,20 @@ def _is_header_or_address(line: str) -> bool:
     if STATE_RE.search(s):
         words = re.findall(r"[A-Za-z]+", s)
         has_money = bool(MONEY_TOKEN_RE.search(s))
-        if 2 <= len(words) <= 10 and not has_money:
+        if 2 <= len(words) <= 12 and not has_money:
             return True
 
     return False
+
+
+def _has_valid_item_words(line: str) -> bool:
+    """
+    Only consider a line to have "real item words" if it contains alphabetic
+    words (>=2 letters) that are NOT just units/codes like LB/LBS/VOV/etc.
+    """
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", line or "")]
+    words = [w for w in words if w not in STOP_ITEM_WORDS]
+    return len(words) > 0
 
 
 def _looks_like_item(line: str) -> bool:
@@ -181,19 +212,20 @@ def _looks_like_item(line: str) -> bool:
         return False
 
     s = (line or "").strip()
+    sl = s.lower().strip()
 
-    # ✅ absolute killers for your screenshots
+    # 🔥 absolute killers
     if ONLY_MONEYISH_RE.match(s):
         return False
     if PRICE_FLAG_RE.match(s):
         return False
-
-    # reject any line that is basically just numbers and punctuation
-    letters = len(re.findall(r"[A-Za-z]", s))
-    digits = len(re.findall(r"\d", s))
-    if letters == 0:
+    if WEIGHT_ONLY_RE.match(s):
         return False
-    if digits >= 4 and letters <= 2:
+    if SHORT_CODE_ONLY_RE.match(s) and sl in STOP_ITEM_WORDS:
+        return False
+
+    # kill per-unit prices like 0.69/LB (even if they appear alone or inside lines)
+    if PER_UNIT_PRICE_RE.search(s) and not _has_valid_item_words(s):
         return False
 
     if NOISE_RE.search(s):
@@ -201,11 +233,18 @@ def _looks_like_item(line: str) -> bool:
     if _is_header_or_address(s):
         return False
 
-    # Must contain at least one "real word" (>= 2 letters)
-    if not REAL_WORD_RE.search(s):
+    # reject any line that is basically just numbers/punct + tiny letters
+    letters = len(re.findall(r"[A-Za-z]", s))
+    digits = len(re.findall(r"\d", s))
+    if letters == 0:
+        return False
+    if digits >= 4 and letters <= 2:
         return False
 
-    # Avoid very long junk lines
+    # must contain at least one valid item word (not just LB/LBS/VOV/etc.)
+    if not _has_valid_item_words(s):
+        return False
+
     if len(s) > 64:
         return False
 
@@ -215,7 +254,7 @@ def _looks_like_item(line: str) -> bool:
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
 
-    # remove trailing prices (common)
+    # remove trailing prices
     s = re.sub(r"\s+\$?\d+(?:\.\d{2})\s*$", "", s)
 
     # remove unit-price pattern like "2 @ 3.99"
@@ -223,6 +262,9 @@ def _clean_line(line: str) -> str:
 
     # remove repeated trailing money tokens
     s = re.sub(r"(?:\s+\$?\d+(?:\.\d{2}))+\s*$", "", s).strip()
+
+    # remove isolated per-unit tokens that often dangle after OCR
+    s = re.sub(r"\b\d+(?:\.\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
 
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
@@ -232,21 +274,18 @@ def _clean_line(line: str) -> str:
 def _parse_quantity(line: str) -> tuple[int, str]:
     s = (line or "").strip()
 
-    # trailing xN
     m = re.search(r"(.*?)\b[xX]\s*(\d+)\s*$", s)
     if m:
         name = m.group(1).strip()
         qty = int(m.group(2))
         return max(qty, 1), name
 
-    # leading Nx
     m = re.match(r"^\s*(\d+)\s*[xX]\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
         name = m.group(2).strip()
         return max(qty, 1), name
 
-    # leading quantity
     m = re.match(r"^\s*(\d+)\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
@@ -366,10 +405,8 @@ async def parse_receipt(
 
     kept: list[str] = []
     for ln in lines:
-        # first-pass filter
         if _looks_like_item(ln):
             cleaned = _clean_line(ln)
-            # second-pass filter after removing prices etc
             if cleaned and _looks_like_item(cleaned):
                 kept.append(cleaned)
 
@@ -378,12 +415,14 @@ async def parse_receipt(
         qty, name = _parse_quantity(ln)
         name = _clean_line(name)
 
-        # final absolute sanity checks (kills edge cases)
-        if not name or not REAL_WORD_RE.search(name):
+        # Final absolute sanity checks
+        if not name:
             continue
-        if ONLY_MONEYISH_RE.match(name) or PRICE_FLAG_RE.match(name):
+        if ONLY_MONEYISH_RE.match(name) or PRICE_FLAG_RE.match(name) or WEIGHT_ONLY_RE.match(name):
             continue
-        if _is_header_or_address(name):
+        if NOISE_RE.search(name) or _is_header_or_address(name):
+            continue
+        if not _has_valid_item_words(name):
             continue
 
         category = _classify(name)
@@ -436,7 +475,7 @@ PRODUCT_IMAGE_MAP: dict[str, str] = {
     "bread": "https://images.unsplash.com/photo-1608198093002-de0e3580bb67?w=512&q=80",
     "garlic": "https://images.unsplash.com/photo-1506806732259-39c2d0268443?w=512&q=80",
     "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
-    "grapes": "https://images.unsplash.com/photo-1601004890211-3f3d02dd3c10?w=512&q=80",
+    "grapes": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
 }
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
