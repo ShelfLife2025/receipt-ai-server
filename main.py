@@ -12,6 +12,8 @@ main.py — ShelfLife receipt + image service (Render-ready)
    - short junk tokens like "VOV"
    - addresses / headers / totals / store meta
 ✅ still filters to ONLY grocery (Food) items
+
+✅ NEW: expands common receipt abbreviations into full words/phrases
 """
 
 from __future__ import annotations
@@ -133,7 +135,7 @@ STOP_ITEM_WORDS = {
     "lb", "lbs", "oz", "g", "kg", "ct", "ea", "each",
     "w", "wt", "weight",
     "at", "x",
-    "vov",  # kill it even if OCR varies casing
+    "vov",
 }
 
 # ✅ short junk codes: kill if line is ONLY a short token like "VOV"
@@ -171,6 +173,115 @@ def title_case(s: str) -> str:
     return " ".join(out).strip()
 
 
+# ---------------- ABBREVIATION EXPANSION (NEW) ----------------
+
+ABBREV_TOKEN_MAP: dict[str, str] = {
+    # dairy
+    "crm": "cream",
+    "chs": "cheese",
+    "whp": "whipping",
+    "whp.": "whipping",
+    "hvy": "heavy",
+    "hvy.": "heavy",
+    "sour": "sour",
+    "cr": "cream",        # often shows as "cr chs" (cream cheese)
+    "chs.": "cheese",
+    "bttr": "butter",
+    "marg": "margarine",
+    "yog": "yogurt",
+
+    # pantry / staples
+    "veg": "vegetable",
+    "org": "organic",
+    "wheat": "wheat",
+    "wb": "whole",
+    "grd": "ground",
+    "bf": "beef",
+    "chk": "chicken",
+    "brst": "breast",
+    "flr": "flour",
+    "pdr": "powdered",
+    "sug": "sugar",
+    "brn": "brown",
+    "van": "vanilla",
+    "ext": "extract",
+    "vngr": "vinegar",
+
+    # household-ish (won’t matter because you filter Food only, but keeps names clean)
+    "alc": "alcohol",
+    "iso": "isopropyl",
+    "isoprop": "isopropyl",
+    "isopropyl": "isopropyl",
+}
+
+# phrase rules: normalized input -> normalized output
+PHRASE_MAP: dict[str, str] = {
+    "half and half": "half-and-half",
+    "h and h": "half-and-half",
+    "hnh": "half-and-half",
+    "hf and hf": "half-and-half",
+
+    "heavy whipping cream": "heavy whipping cream",
+    "cream cheese": "cream cheese",
+    "sour cream": "sour cream",
+
+    "ground beef": "ground beef",
+    "chicken breast": "chicken breast",
+
+    "olive oil": "olive oil",
+    "vegetable oil": "vegetable oil",
+
+    "all purpose flour": "all-purpose flour",
+    "powdered sugar": "powdered sugar",
+    "brown sugar": "brown sugar",
+    "vanilla extract": "vanilla extract",
+    "apple cider vinegar": "apple cider vinegar",
+    "balsamic vinegar": "balsamic vinegar",
+}
+
+def _normalize_for_phrase_match(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = s.replace("&", " and ")
+    s = re.sub(r"[^a-z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def expand_abbreviations(name: str) -> str:
+    """
+    Best-effort expansion of common receipt abbreviations -> human-friendly names.
+    Does NOT invent brands; it expands what’s already present.
+    """
+    if not name:
+        return ""
+
+    # tokenize (keep digits like "12" and "ct" etc.)
+    raw = (name or "").strip()
+    raw = raw.replace("&", " and ")
+    raw = raw.replace("-", " ")
+    raw = re.sub(r"[^\w\s]", " ", raw)  # strip punctuation
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    toks = [t for t in raw.split(" ") if t]
+    expanded: list[str] = []
+    for t in toks:
+        tl = t.lower()
+        expanded.append(ABBREV_TOKEN_MAP.get(tl, tl))
+
+    # phrase fixes (apply on normalized string)
+    joined = " ".join(expanded).strip()
+    norm = _normalize_for_phrase_match(joined)
+
+    # prefer longest phrase match first
+    # (simple greedy: try all phrases by length desc)
+    for k in sorted(PHRASE_MAP.keys(), key=lambda x: len(x.split()), reverse=True):
+        if k in norm:
+            norm = re.sub(rf"\b{re.escape(k)}\b", PHRASE_MAP[k], norm)
+
+    # final cleanup spacing
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
 def _is_header_or_address(line: str) -> bool:
     s = (line or "").strip()
     if not s:
@@ -183,11 +294,9 @@ def _is_header_or_address(line: str) -> bool:
     if DATE_RE.search(s) or TIME_RE.search(s):
         return True
 
-    # street number + suffix OR street number + direction
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
 
-    # state line like “Winter Park FL”
     if STATE_RE.search(s):
         words = re.findall(r"[A-Za-z]+", s)
         has_money = bool(MONEY_TOKEN_RE.search(s))
@@ -198,10 +307,6 @@ def _is_header_or_address(line: str) -> bool:
 
 
 def _has_valid_item_words(line: str) -> bool:
-    """
-    Only consider a line to have "real item words" if it contains alphabetic
-    words (>=2 letters) that are NOT just units/codes like LB/LBS/VOV/etc.
-    """
     words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", line or "")]
     words = [w for w in words if w not in STOP_ITEM_WORDS]
     return len(words) > 0
@@ -214,7 +319,6 @@ def _looks_like_item(line: str) -> bool:
     s = (line or "").strip()
     sl = s.lower().strip()
 
-    # 🔥 absolute killers
     if ONLY_MONEYISH_RE.match(s):
         return False
     if PRICE_FLAG_RE.match(s):
@@ -224,7 +328,6 @@ def _looks_like_item(line: str) -> bool:
     if SHORT_CODE_ONLY_RE.match(s) and sl in STOP_ITEM_WORDS:
         return False
 
-    # kill per-unit prices like 0.69/LB (even if they appear alone or inside lines)
     if PER_UNIT_PRICE_RE.search(s) and not _has_valid_item_words(s):
         return False
 
@@ -233,7 +336,6 @@ def _looks_like_item(line: str) -> bool:
     if _is_header_or_address(s):
         return False
 
-    # reject any line that is basically just numbers/punct + tiny letters
     letters = len(re.findall(r"[A-Za-z]", s))
     digits = len(re.findall(r"\d", s))
     if letters == 0:
@@ -241,7 +343,6 @@ def _looks_like_item(line: str) -> bool:
     if digits >= 4 and letters <= 2:
         return False
 
-    # must contain at least one valid item word (not just LB/LBS/VOV/etc.)
     if not _has_valid_item_words(s):
         return False
 
@@ -254,16 +355,9 @@ def _looks_like_item(line: str) -> bool:
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
 
-    # remove trailing prices
     s = re.sub(r"\s+\$?\d+(?:\.\d{2})\s*$", "", s)
-
-    # remove unit-price pattern like "2 @ 3.99"
     s = UNIT_PRICE_RE.sub("", s).strip()
-
-    # remove repeated trailing money tokens
     s = re.sub(r"(?:\s+\$?\d+(?:\.\d{2}))+\s*$", "", s).strip()
-
-    # remove isolated per-unit tokens that often dangle after OCR
     s = re.sub(r"\b\d+(?:\.\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
 
     s = s.replace("—", "-")
@@ -415,7 +509,9 @@ async def parse_receipt(
         qty, name = _parse_quantity(ln)
         name = _clean_line(name)
 
-        # Final absolute sanity checks
+        # ✅ expand abbreviations BEFORE classify/dedupe/title_case
+        name = expand_abbreviations(name)
+
         if not name:
             continue
         if ONLY_MONEYISH_RE.match(name) or PRICE_FLAG_RE.match(name) or WEIGHT_ONLY_RE.match(name):
@@ -427,7 +523,6 @@ async def parse_receipt(
 
         category = _classify(name)
 
-        # ✅ ONLY GROCERY ITEMS
         if category != "Food":
             continue
 
@@ -526,7 +621,6 @@ async def get_product_image(
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
         return Response(content=_IMAGE_CACHE[ck], media_type=_IMAGE_CONTENT_TYPE_CACHE[ck])
 
-    # 1) Packshot service first
     if PACKSHOT_SERVICE_URL:
         qp: list[str] = []
         if product_id:
@@ -552,7 +646,6 @@ async def get_product_image(
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
 
-    # 2) Fallback map
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
 
@@ -564,7 +657,6 @@ async def get_product_image(
         _trim_caches_if_needed()
         return Response(content=img_bytes, media_type=ctype)
 
-    # 3) last-resort 1x1 png
     tiny_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
         "ASsJTYQAAAAASUVORK5CYII="
