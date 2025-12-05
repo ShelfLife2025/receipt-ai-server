@@ -1,19 +1,18 @@
 """
 main.py — ShelfLife receipt + image service (Render-ready)
 
-✅ Deploy-safe
-✅ /parse-receipt (Google Vision OCR)
-✅ /image (packshot proxy → fallback map → tiny png)
-✅ /health
+- Deploy-safe
+- /parse-receipt (Google Vision OCR)
+- /image (packshot proxy → fallback map → tiny png)
+- /health
 
-✅ FIXED (final): blocks random pulls HARD
-   - price-only lines like "7.69 F", "$5.49"
-   - weight/unit-only lines like "0.96 LB", "1.23 LBS", "0.69/LB"
-   - short junk tokens like "VOV"
-   - addresses / headers / totals / store meta
-✅ still filters to ONLY grocery (Food) items
+Filtering:
+- Blocks random pulls hard (price-only, weight-only, short junk tokens, addresses/headers/totals/meta)
+- Filters to only grocery (Food) items
+- Expands common receipt abbreviations into full words/phrases
 
-✅ NEW: expands common receipt abbreviations into full words/phrases
+Instacart:
+- /instacart/create-list creates an Instacart shopping-list link for a set of items
 """
 
 from __future__ import annotations
@@ -27,7 +26,8 @@ import urllib.parse
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, UploadFile, Query, Request
+from pydantic import BaseModel
+from fastapi import FastAPI, File, UploadFile, Query, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, ImageOps, ImageFilter
 
@@ -91,7 +91,7 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # ✅ specific junk token seen in your scans
+    # specific junk token seen in scans
     r"\bvov\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
@@ -117,7 +117,7 @@ MONEY_TOKEN_RE = re.compile(r"\$?\d{1,6}(?:\.\d{2})\b")
 ONLY_MONEYISH_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})?\s*$")
 PRICE_FLAG_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})\s*[A-Za-z]{1,2}\s*$")
 
-# ✅ weight/unit-only line killers
+# weight/unit-only line killers
 WEIGHT_ONLY_RE = re.compile(
     r"^\s*\$?\d+(?:\.\d+)?\s*(lb|lbs|oz|g|kg|ct)\s*$",
     re.IGNORECASE,
@@ -130,7 +130,7 @@ PER_UNIT_PRICE_RE = re.compile(
 # word token that looks like a real item word (>=2 letters)
 REAL_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 
-# ✅ “words” that should NOT count as an item word
+# “words” that should NOT count as an item word
 STOP_ITEM_WORDS = {
     "lb", "lbs", "oz", "g", "kg", "ct", "ea", "each",
     "w", "wt", "weight",
@@ -138,7 +138,7 @@ STOP_ITEM_WORDS = {
     "vov",
 }
 
-# ✅ short junk codes: kill if line is ONLY a short token like "VOV"
+# short junk codes: kill if line is ONLY a short token like "VOV"
 SHORT_CODE_ONLY_RE = re.compile(r"^\s*[A-Za-z]{2,5}\s*$")
 
 HOUSEHOLD_WORDS = {
@@ -173,7 +173,7 @@ def title_case(s: str) -> str:
     return " ".join(out).strip()
 
 
-# ---------------- ABBREVIATION EXPANSION (NEW) ----------------
+# ---------------- ABBREVIATION EXPANSION ----------------
 
 ABBREV_TOKEN_MAP: dict[str, str] = {
     # dairy
@@ -184,7 +184,7 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "hvy": "heavy",
     "hvy.": "heavy",
     "sour": "sour",
-    "cr": "cream",        # often shows as "cr chs" (cream cheese)
+    "cr": "cream",
     "chs.": "cheese",
     "bttr": "butter",
     "marg": "margarine",
@@ -193,7 +193,6 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     # pantry / staples
     "veg": "vegetable",
     "org": "organic",
-    "wheat": "wheat",
     "wb": "whole",
     "grd": "ground",
     "bf": "beef",
@@ -207,14 +206,13 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "ext": "extract",
     "vngr": "vinegar",
 
-    # household-ish (won’t matter because you filter Food only, but keeps names clean)
+    # household-ish
     "alc": "alcohol",
     "iso": "isopropyl",
     "isoprop": "isopropyl",
     "isopropyl": "isopropyl",
 }
 
-# phrase rules: normalized input -> normalized output
 PHRASE_MAP: dict[str, str] = {
     "half and half": "half-and-half",
     "h and h": "half-and-half",
@@ -239,6 +237,7 @@ PHRASE_MAP: dict[str, str] = {
     "balsamic vinegar": "balsamic vinegar",
 }
 
+
 def _normalize_for_phrase_match(s: str) -> str:
     s = (s or "").lower().strip()
     s = s.replace("&", " and ")
@@ -246,19 +245,15 @@ def _normalize_for_phrase_match(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def expand_abbreviations(name: str) -> str:
-    """
-    Best-effort expansion of common receipt abbreviations -> human-friendly names.
-    Does NOT invent brands; it expands what’s already present.
-    """
     if not name:
         return ""
 
-    # tokenize (keep digits like "12" and "ct" etc.)
     raw = (name or "").strip()
     raw = raw.replace("&", " and ")
     raw = raw.replace("-", " ")
-    raw = re.sub(r"[^\w\s]", " ", raw)  # strip punctuation
+    raw = re.sub(r"[^\w\s]", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
 
     toks = [t for t in raw.split(" ") if t]
@@ -267,17 +262,13 @@ def expand_abbreviations(name: str) -> str:
         tl = t.lower()
         expanded.append(ABBREV_TOKEN_MAP.get(tl, tl))
 
-    # phrase fixes (apply on normalized string)
     joined = " ".join(expanded).strip()
     norm = _normalize_for_phrase_match(joined)
 
-    # prefer longest phrase match first
-    # (simple greedy: try all phrases by length desc)
     for k in sorted(PHRASE_MAP.keys(), key=lambda x: len(x.split()), reverse=True):
         if k in norm:
             norm = re.sub(rf"\b{re.escape(k)}\b", PHRASE_MAP[k], norm)
 
-    # final cleanup spacing
     norm = re.sub(r"\s+", " ", norm).strip()
     return norm
 
@@ -509,7 +500,6 @@ async def parse_receipt(
         qty, name = _parse_quantity(ln)
         name = _clean_line(name)
 
-        # ✅ expand abbreviations BEFORE classify/dedupe/title_case
         name = expand_abbreviations(name)
 
         if not name:
@@ -550,6 +540,51 @@ async def parse_receipt(
         }
 
     return parsed
+
+
+# ---------------- INSTACART LIST LINK ----------------
+
+class InstacartLineItem(BaseModel):
+    name: str
+    quantity: float = 1.0
+    unit: str = "each"
+
+
+class InstacartCreateListRequest(BaseModel):
+    title: str = "ShelfLife Shopping List"
+    items: list[InstacartLineItem]
+
+
+@app.post("/instacart/create-list")
+async def instacart_create_list(req: InstacartCreateListRequest):
+    api_key = (os.getenv("INSTACART_API_KEY") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY env var on server")
+
+    payload = {
+        "title": req.title,
+        "link_type": "shopping_list",
+        "line_items": [
+            {"name": i.name, "quantity": i.quantity, "unit": i.unit}
+            for i in req.items
+        ],
+    }
+
+    url = "https://connect.instacart.com/idp/v1/products/products_link"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=headers, json=payload)
+
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+
+    data = r.json()
+    return {"products_link_url": data.get("products_link_url"), "raw": data}
 
 
 # ===================== IMAGE DELIVERY =====================
