@@ -555,7 +555,11 @@ class InstacartCreateListRequest(BaseModel):
     items: list[InstacartLineItem]
 
 
+# ✅ FIX: accept common path variants so the app doesn't 404 if it uses underscores or trailing slashes
 @app.post("/instacart/create-list")
+@app.post("/instacart/create-list/")
+@app.post("/instacart/create_list")
+@app.post("/instacart/create_list/")
 async def instacart_create_list(req: InstacartCreateListRequest):
     api_key = (os.getenv("INSTACART_API_KEY") or "").strip()
     if not api_key:
