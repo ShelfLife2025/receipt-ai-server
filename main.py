@@ -173,6 +173,41 @@ def title_case(s: str) -> str:
     return " ".join(out).strip()
 
 
+# -------- NEW: early junk-line gate (reduces OCR noise before item parsing) --------
+def _is_junk_line_gate(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return True
+
+    # too short / no letters => almost always receipt noise
+    if len(s) < 3:
+        return True
+    if not re.search(r"[A-Za-z]", s):
+        return True
+
+    # remove obvious meta first
+    if NOISE_RE.search(s):
+        return True
+    if _is_header_or_address(s):
+        return True
+
+    # drop price-only / weight-only / weird price flags early
+    if ONLY_MONEYISH_RE.match(s):
+        return True
+    if PRICE_FLAG_RE.match(s):
+        return True
+    if WEIGHT_ONLY_RE.match(s):
+        return True
+
+    # very digit-heavy short lines (common in refs/auths)
+    letters = len(re.findall(r"[A-Za-z]", s))
+    digits = len(re.findall(r"\d", s))
+    if digits >= 4 and letters <= 2:
+        return True
+
+    return False
+
+
 # ---------------- ABBREVIATION EXPANSION ----------------
 
 ABBREV_TOKEN_MAP: dict[str, str] = {
@@ -487,6 +522,10 @@ async def parse_receipt(
 
     lines = [ln.strip() for ln in (text or "").splitlines()]
     lines = [ln for ln in lines if ln]
+    raw_lines = lines[:]  # keep original for debug counts
+
+    # NEW: early junk-line gate
+    lines = [ln for ln in lines if not _is_junk_line_gate(ln)]
 
     kept: list[str] = []
     for ln in lines:
@@ -533,7 +572,7 @@ async def parse_receipt(
     if debug:
         return {
             "items": parsed,
-            "raw_line_count": len(lines),
+            "raw_line_count": len(raw_lines),
             "kept_line_count": len(kept),
             "kept_lines": kept[:200],
             "base_url": base_url,
@@ -713,3 +752,4 @@ async def _log_requests(request: Request, call_next):
         return resp
     finally:
         print(f"{request.method} {request.url.path}")
+
