@@ -52,15 +52,21 @@ from google.cloud import vision
 OFF_CLIENT: Optional[httpx.AsyncClient] = None
 IMG_CLIENT: Optional[httpx.AsyncClient] = None
 
-
 app = FastAPI()
 
 
 @app.on_event("startup")
 async def _startup():
     global OFF_CLIENT, IMG_CLIENT
-    OFF_CLIENT = httpx.AsyncClient(timeout=float(os.getenv("ENRICH_TIMEOUT_SECONDS", "4.0")), follow_redirects=True)
-    IMG_CLIENT = httpx.AsyncClient(timeout=12.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+    OFF_CLIENT = httpx.AsyncClient(
+        timeout=float(os.getenv("ENRICH_TIMEOUT_SECONDS", "4.0")),
+        follow_redirects=True,
+    )
+    IMG_CLIENT = httpx.AsyncClient(
+        timeout=12.0,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
     _init_google_credentials_file()
     _load_learned_map()
     _load_pending_map()
@@ -371,6 +377,35 @@ def _image_url_for_item(base_url: str, name: str) -> str:
 
 
 # ============================================================
+# NEW: Price-aware keep gate (reduces random receipt junk)
+# ============================================================
+
+def _raw_line_has_price_or_qty_hint(s: str) -> bool:
+    """
+    Item lines almost always contain a price token or unit-price token.
+    We require one of these hints BEFORE we even try _looks_like_item.
+    This removes most random headers, promos, rewards lines, etc.
+    """
+    if not s:
+        return False
+
+    # Has a price like 3.99 or $3.99 (anywhere in the raw OCR line)
+    if MONEY_TOKEN_RE.search(s):
+        return True
+
+    # "2 @ 3.99" style
+    if UNIT_PRICE_RE.search(s):
+        return True
+
+    # Qty hints that sometimes appear with/without explicit trailing prices
+    # "x2" or "2x"
+    if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
+        return True
+
+    return False
+
+
+# ============================================================
 # Store hint
 # ============================================================
 
@@ -511,7 +546,6 @@ def expand_abbreviations(name: str) -> str:
 
 ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
 
-# Defaults requested by you:
 ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.58"))
 ENRICH_TIMEOUT_SECONDS = float(os.getenv("ENRICH_TIMEOUT_SECONDS", "4.0"))
 
@@ -535,7 +569,6 @@ OFF_FIELDS = (os.getenv("OFF_FIELDS") or "product_name,product_name_en,brands,qu
 
 _LEARNED_MAP: dict[str, str] = {}
 
-# Pending map: captures “unresolved” lines so you can turn them into learned-map entries
 PENDING_PATH = (os.getenv("PENDING_PATH") or "/tmp/pending_map.json").strip()
 PENDING_ENABLED = (os.getenv("PENDING_ENABLED", "1").strip() == "1")
 _PENDING: dict[str, dict[str, Any]] = {}
@@ -661,7 +694,6 @@ def _score_candidate(query: str, candidate: str, store_hint: str = "") -> float:
     overlap = len(q_set & c_set) / max(len(q_set), 1)
     fuzzy = difflib.SequenceMatcher(None, q, c).ratio()
 
-    # prevent fuzzy-only hallucinations
     if overlap < 0.28 and fuzzy < 0.55:
         return 0.0
 
@@ -742,7 +774,6 @@ async def _openfoodfacts_best_match(name: str, store_hint: str = "") -> Optional
     if "publix" in key:
         variants.append(re.sub(r"\bpublix\b", "", key).strip())
 
-    # Extra: token-reduced variant (helps when receipts include junk tokens)
     toks = [t for t in key.split() if t not in {"publix"}]
     if len(toks) >= 2:
         variants.append(" ".join(toks[:4]))
@@ -832,7 +863,6 @@ async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str,
                 _enrich_cache_set(cache_key, candidate, "openfoodfacts_forced", score)
             return candidate, "openfoodfacts_forced", score, query_used
 
-    # record into pending so you can convert these into learned-map entries
     _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
 
     if cache_key:
@@ -918,24 +948,31 @@ async def parse_receipt(
     # early junk-line gate
     lines = [ln for ln in lines if not _is_junk_line_gate(ln)]
 
-    kept: list[str] = []
+    # IMPORTANT CHANGE:
+    # Keep BOTH raw and cleaned lines, and require price/qty hints on the raw line
+    kept: list[tuple[str, str]] = []  # (raw_line, cleaned_line)
     for ln in lines:
-        if _looks_like_item(ln):
-            cleaned = _clean_line(ln)
+        raw_ln = ln
+        if not _raw_line_has_price_or_qty_hint(raw_ln):
+            continue
+        if _looks_like_item(raw_ln):
+            cleaned = _clean_line(raw_ln)
             if cleaned and _looks_like_item(cleaned):
-                kept.append(cleaned)
+                kept.append((raw_ln, cleaned))
 
     parsed: list[dict[str, Any]] = []
     enrich_debug: list[dict[str, Any]] = []
 
-    for ln in kept:
-        qty, name = _parse_quantity(ln)
+    for raw_ln, cleaned_ln in kept:
+        qty, name = _parse_quantity(cleaned_ln)
         name_cleaned = _clean_line(name)
 
         expanded = expand_abbreviations(name_cleaned)
 
+        # IMPORTANT CHANGE:
+        # use the REAL raw line for learned-map lookup + better pending examples
         enriched, source, score, query_used = await enrich_full_name(
-            raw_line=ln,
+            raw_line=raw_ln,
             cleaned_name=name_cleaned,
             expanded_name=expanded,
             store_hint=store_hint,
@@ -946,7 +983,8 @@ async def parse_receipt(
         if debug:
             enrich_debug.append(
                 {
-                    "line": ln,
+                    "raw_line": raw_ln,
+                    "cleaned_line": cleaned_ln,
                     "qty": qty,
                     "name_cleaned": name_cleaned,
                     "name_expanded": expanded,
@@ -982,8 +1020,11 @@ async def parse_receipt(
         return {
             "items": parsed,
             "raw_line_count": len(raw_lines),
+
+            # IMPORTANT CHANGE: kept is now tuples
             "kept_line_count": len(kept),
-            "kept_lines": kept[:200],
+            "kept_lines": [c for (_r, c) in kept][:200],
+
             "base_url": base_url,
             "store_hint": store_hint,
             "enrichment_debug": enrich_debug[:200],
@@ -1183,7 +1224,6 @@ async def admin_pending(key: str | None = Query(None), limit: int = Query(200)):
     """
     _require_admin(key)
     items = list(_PENDING.items())
-    # sort by count desc
     items.sort(key=lambda kv: int((kv[1] or {}).get("count", 0)), reverse=True)
     out = [{"key": k, **v} for k, v in items[: max(1, min(limit, 2000))]]
     return {"pending": out, "total": len(_PENDING), "path": PENDING_PATH}
@@ -1214,7 +1254,6 @@ async def admin_feedback(body: FeedbackBody, key: str | None = Query(None)):
     if not expanded or not full_name:
         raise HTTPException(status_code=400, detail="expanded and full_name required")
 
-    # Write multiple keys to maximize hit-rate
     updates: dict[str, str] = {}
     updates[expanded] = full_name
     updates[dedupe_key(expanded)] = full_name
@@ -1224,7 +1263,6 @@ async def admin_feedback(body: FeedbackBody, key: str | None = Query(None)):
         updates[f"{store_hint}:{dedupe_key(expanded)}"] = full_name
         updates[f"{dedupe_key(store_hint)}:{dedupe_key(expanded)}"] = full_name
 
-    # merge into file map
     current: dict[str, str] = {}
     try:
         if os.path.exists(NAME_MAP_PATH):
@@ -1241,10 +1279,8 @@ async def admin_feedback(body: FeedbackBody, key: str | None = Query(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write learned map: {e}")
 
-    # reload in-memory map
     _load_learned_map()
 
-    # optional: remove from pending
     pend_key = dedupe_key(f"{store_hint}:{expanded}" if store_hint else expanded)
     if pend_key in _PENDING:
         _PENDING.pop(pend_key, None)
