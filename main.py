@@ -5,14 +5,17 @@ main.py — ShelfLife receipt + image service (Render-ready)
 - /parse-receipt (Google Vision OCR)
 - /image (packshot proxy → fallback map → tiny png)
 - /health
+- /instacart/create-list
 
-Filtering:
-- Blocks random pulls hard (price-only, weight-only, short junk tokens, addresses/headers/totals/meta)
-- Filters to only grocery (Food) items
-- Expands common receipt abbreviations into full words/phrases
-
-Instacart:
-- /instacart/create-list creates an Instacart shopping-list link for a set of items
+Core goals:
+1) High-precision line extraction: aggressively filter non-items (totals, headers, addresses, etc.).
+2) Parse quantities and clean price/unit artifacts.
+3) Expand abbreviations + preserve common multi-word phrases.
+4) BEST-EFFORT "full name enrichment" to get closer to branded product names:
+   - Optional learned mapping (store-specific translations)
+   - Optional Open Food Facts search (no key required)
+   - Confidence gating + caching (never confidently guess wrong)
+5) Return only grocery items (Food) by default (existing behavior).
 """
 
 from __future__ import annotations
@@ -21,9 +24,11 @@ import os
 import re
 import io
 import json
+import time
 import base64
 import urllib.parse
-from typing import Any
+import difflib
+from typing import Any, Optional, Tuple
 
 import httpx
 from pydantic import BaseModel
@@ -161,15 +166,56 @@ def dedupe_key(s: str) -> str:
 
 
 def title_case(s: str) -> str:
-    small = {"and", "or", "of", "the", "a", "an", "to", "in", "on", "for"}
+    """
+    Improved title casing while staying close to your current behavior:
+    - Keeps small connector words lowercase (except first)
+    - Preserves short acronyms (BBQ, USDA, etc.)
+    - Handles hyphenated words: "half-and-half" -> "Half-and-Half"
+    - Preserves apostrophes reasonably: "rao's" -> "Rao's"
+    """
+    small = {"and", "or", "of", "the", "a", "an", "to", "in", "on", "for", "with"}
     words = [w for w in re.split(r"\s+", (s or "").strip()) if w]
+
+    def cap_word(w: str, is_first: bool) -> str:
+        raw = w.strip()
+        if not raw:
+            return raw
+
+        # Preserve acronyms (all letters, already uppercase, short)
+        if raw.isalpha() and raw.upper() == raw and 2 <= len(raw) <= 5:
+            return raw
+
+        lw = raw.lower()
+        if not is_first and lw in small:
+            return lw
+
+        # Handle hyphenated
+        if "-" in raw:
+            parts = [p for p in raw.split("-") if p != ""]
+            capped_parts: list[str] = []
+            for i, p in enumerate(parts):
+                if not p:
+                    continue
+                pl = p.lower()
+                if i != 0 and pl in small:
+                    capped_parts.append(pl)
+                else:
+                    capped_parts.append(pl[:1].upper() + pl[1:])
+            return "-".join(capped_parts)
+
+        # Handle apostrophes
+        if "'" in raw:
+            parts = raw.split("'")
+            base = parts[0].lower()
+            base = base[:1].upper() + base[1:] if base else base
+            rest = "'".join(parts[1:])
+            return base + ("'" + rest.lower() if rest else "")
+
+        return lw[:1].upper() + lw[1:]
+
     out: list[str] = []
     for i, w in enumerate(words):
-        lw = w.lower()
-        if i != 0 and lw in small:
-            out.append(lw)
-        else:
-            out.append(lw[:1].upper() + lw[1:])
+        out.append(cap_word(w, is_first=(i == 0)))
     return " ".join(out).strip()
 
 
@@ -282,6 +328,10 @@ def _normalize_for_phrase_match(s: str) -> str:
 
 
 def expand_abbreviations(name: str) -> str:
+    """
+    Expands common receipt abbreviations and preserves multi-word phrases via PHRASE_MAP.
+    Returns a normalized lowercase-ish string (matching existing behavior).
+    """
     if not name:
         return ""
 
@@ -381,6 +431,7 @@ def _looks_like_item(line: str) -> bool:
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
 
+    # Remove trailing prices and per-unit fragments; keep the core name.
     s = re.sub(r"\s+\$?\d+(?:\.\d{2})\s*$", "", s)
     s = UNIT_PRICE_RE.sub("", s).strip()
     s = re.sub(r"(?:\s+\$?\d+(?:\.\d{2}))+\s*$", "", s).strip()
@@ -391,7 +442,7 @@ def _clean_line(line: str) -> str:
     return s
 
 
-def _parse_quantity(line: str) -> tuple[int, str]:
+def _parse_quantity(line: str) -> Tuple[int, str]:
     s = (line or "").strip()
 
     m = re.search(r"(.*?)\b[xX]\s*(\d+)\s*$", s)
@@ -451,6 +502,214 @@ def _public_base_url(request: Request) -> str:
 def _image_url_for_item(base_url: str, name: str) -> str:
     qname = urllib.parse.quote((name or "").strip())
     return f"{base_url}/image?name={qname}"
+
+
+# ---------------- NAME ENRICHMENT ----------------
+# Best-effort, confidence-gated, cached. Never blocks core functionality.
+
+ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
+ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.62"))  # tune per store
+ENRICH_TIMEOUT_SECONDS = float(os.getenv("ENRICH_TIMEOUT_SECONDS", "4.0"))
+
+# Learned mapping: store-specific translations (optional).
+# You can provide mappings via:
+#  - NAME_MAP_JSON: JSON object {"raw_or_key": "Full Product Name", ...}
+#  - NAME_MAP_PATH: path to a json file (Render disk or /tmp) with same format
+NAME_MAP_JSON = (os.getenv("NAME_MAP_JSON") or "").strip()
+NAME_MAP_PATH = (os.getenv("NAME_MAP_PATH") or "/tmp/name_map.json").strip()
+
+# In-memory cache for enrichment results
+_ENRICH_CACHE: dict[str, Tuple[float, str, str, float]] = {}  # key -> (expires_at, name, source, score)
+_ENRICH_CACHE_TTL = int(os.getenv("ENRICH_CACHE_TTL_SECONDS", "86400"))
+
+# Open Food Facts search (no key required)
+OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
+OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "8"))
+
+# Loaded learned mappings
+_LEARNED_MAP: dict[str, str] = {}
+
+
+def _load_learned_map() -> None:
+    global _LEARNED_MAP
+    _LEARNED_MAP = {}
+
+    # Env JSON overrides file
+    if NAME_MAP_JSON:
+        try:
+            obj = json.loads(NAME_MAP_JSON)
+            if isinstance(obj, dict):
+                _LEARNED_MAP = {str(k): str(v) for k, v in obj.items()}
+                print(f"Learned map: loaded {len(_LEARNED_MAP)} entries from NAME_MAP_JSON")
+                return
+        except Exception as e:
+            print("Learned map: failed to parse NAME_MAP_JSON:", e)
+
+    # File fallback
+    try:
+        if os.path.exists(NAME_MAP_PATH):
+            with open(NAME_MAP_PATH, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            if isinstance(obj, dict):
+                _LEARNED_MAP = {str(k): str(v) for k, v in obj.items()}
+                print(f"Learned map: loaded {len(_LEARNED_MAP)} entries from {NAME_MAP_PATH}")
+    except Exception as e:
+        print("Learned map: failed to load file:", e)
+
+
+_load_learned_map()
+
+
+def _enrich_cache_get(key: str) -> Optional[Tuple[str, str, float]]:
+    rec = _ENRICH_CACHE.get(key)
+    if not rec:
+        return None
+    expires_at, name, source, score = rec
+    if time.time() > expires_at:
+        _ENRICH_CACHE.pop(key, None)
+        return None
+    return name, source, score
+
+
+def _enrich_cache_set(key: str, name: str, source: str, score: float) -> None:
+    _ENRICH_CACHE[key] = (time.time() + _ENRICH_CACHE_TTL, name, source, score)
+
+
+def _score_candidate(query: str, candidate: str) -> float:
+    """
+    Score how well a candidate full name matches a receipt-derived query.
+    Mix of token overlap and fuzzy similarity. Range approx [0, 1].
+    """
+    q = dedupe_key(query)
+    c = dedupe_key(candidate)
+    if not q or not c:
+        return 0.0
+
+    q_tokens = set(q.split())
+    c_tokens = set(c.split())
+    if not q_tokens:
+        return 0.0
+
+    overlap = len(q_tokens & c_tokens) / max(len(q_tokens), 1)
+    fuzzy = difflib.SequenceMatcher(None, q, c).ratio()
+
+    # Overlap is more important than fuzzy (prevents random false positives)
+    return 0.65 * overlap + 0.35 * fuzzy
+
+
+def _learned_map_lookup(raw_line: str, cleaned_name: str) -> Optional[str]:
+    """
+    Lookup using multiple keys to maximize hit-rate:
+    - Exact raw line (trimmed)
+    - Deduped raw line
+    - Cleaned/expanded name key
+    """
+    raw = (raw_line or "").strip()
+    if not raw:
+        return None
+
+    keys = [
+        raw,
+        dedupe_key(raw),
+        cleaned_name,
+        dedupe_key(cleaned_name),
+    ]
+    for k in keys:
+        if not k:
+            continue
+        if k in _LEARNED_MAP and _LEARNED_MAP[k].strip():
+            return _LEARNED_MAP[k].strip()
+    return None
+
+
+async def _openfoodfacts_best_match(name: str) -> Optional[Tuple[str, float]]:
+    """
+    Returns (best_candidate, score) from Open Food Facts search if any.
+    Best-effort; may return None if no confident match.
+    """
+    key = dedupe_key(name)
+    if len(key) < 6:
+        return None
+
+    params = {
+        "search_terms": name,
+        "search_simple": 1,
+        "action": "process",
+        "json": 1,
+        "page_size": OFF_PAGE_SIZE,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=ENRICH_TIMEOUT_SECONDS, follow_redirects=True) as client:
+            r = await client.get(OFF_SEARCH_URL, params=params, headers={"User-Agent": "ShelfLife/1.0"})
+        r.raise_for_status()
+        data = r.json()
+        products = data.get("products") or []
+    except Exception:
+        return None
+
+    if not products:
+        return None
+
+    best_name: Optional[str] = None
+    best_score = 0.0
+
+    for p in products[:OFF_PAGE_SIZE]:
+        product_name = (p.get("product_name") or "").strip()
+        brands = (p.get("brands") or "").strip()
+        qty = (p.get("quantity") or "").strip()
+
+        if not product_name:
+            continue
+
+        candidate = " ".join(x for x in [brands, product_name, qty] if x).strip()
+        s = _score_candidate(name, candidate)
+        if s > best_score:
+            best_score = s
+            best_name = candidate
+
+    if best_name:
+        return best_name, best_score
+    return None
+
+
+async def enrich_full_name(raw_line: str, expanded_name: str) -> Tuple[str, str, float]:
+    """
+    Best-effort enrichment. Returns (name, source, score).
+    Sources: learned_map | openfoodfacts | none
+    """
+    # Do nothing if disabled
+    if not ENABLE_NAME_ENRICH:
+        return expanded_name, "none", 0.0
+
+    # Cache by expanded name key (stable across OCR noise)
+    cache_key = dedupe_key(expanded_name)
+    if cache_key:
+        cached = _enrich_cache_get(cache_key)
+        if cached:
+            return cached[0], cached[1], cached[2]
+
+    # 1) Learned map (highest precision)
+    learned = _learned_map_lookup(raw_line, expanded_name)
+    if learned:
+        # Score as max; it's explicitly curated
+        if cache_key:
+            _enrich_cache_set(cache_key, learned, "learned_map", 1.0)
+        return learned, "learned_map", 1.0
+
+    # 2) Open Food Facts (best-effort)
+    off = await _openfoodfacts_best_match(expanded_name)
+    if off:
+        candidate, score = off
+        if score >= ENRICH_MIN_CONF:
+            if cache_key:
+                _enrich_cache_set(cache_key, candidate, "openfoodfacts", score)
+            return candidate, "openfoodfacts", score
+
+    # Fallback
+    if cache_key:
+        _enrich_cache_set(cache_key, expanded_name, "none", 0.0)
+    return expanded_name, "none", 0.0
 
 
 # ---------------- OCR ----------------
@@ -524,7 +783,7 @@ async def parse_receipt(
     lines = [ln for ln in lines if ln]
     raw_lines = lines[:]  # keep original for debug counts
 
-    # NEW: early junk-line gate
+    # early junk-line gate
     lines = [ln for ln in lines if not _is_junk_line_gate(ln)]
 
     kept: list[str] = []
@@ -535,29 +794,52 @@ async def parse_receipt(
                 kept.append(cleaned)
 
     parsed: list[dict[str, Any]] = []
+
+    # extra debug detail per kept line
+    enrich_debug: list[dict[str, Any]] = []
+
     for ln in kept:
         qty, name = _parse_quantity(ln)
         name = _clean_line(name)
 
-        name = expand_abbreviations(name)
+        # baseline expansion
+        expanded = expand_abbreviations(name)
 
-        if not name:
+        # best-effort full-name enrichment
+        enriched, source, score = await enrich_full_name(raw_line=ln, expanded_name=expanded)
+
+        # Continue pipeline on the enriched name (still filtered/gated as before)
+        final_name = enriched.strip()
+
+        if debug:
+            enrich_debug.append(
+                {
+                    "line": ln,
+                    "qty": qty,
+                    "name_cleaned": name,
+                    "name_expanded": expanded,
+                    "name_enriched": enriched,
+                    "enrich_source": source,
+                    "enrich_score": score,
+                }
+            )
+
+        if not final_name:
             continue
-        if ONLY_MONEYISH_RE.match(name) or PRICE_FLAG_RE.match(name) or WEIGHT_ONLY_RE.match(name):
+        if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
             continue
-        if NOISE_RE.search(name) or _is_header_or_address(name):
+        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
             continue
-        if not _has_valid_item_words(name):
+        if not _has_valid_item_words(final_name):
             continue
 
-        category = _classify(name)
-
+        category = _classify(final_name)
         if category != "Food":
             continue
 
         parsed.append(
             {
-                "name": title_case(name),
+                "name": title_case(final_name),
                 "quantity": int(qty),
                 "category": category,
             }
@@ -576,6 +858,9 @@ async def parse_receipt(
             "kept_line_count": len(kept),
             "kept_lines": kept[:200],
             "base_url": base_url,
+            "enrichment_debug": enrich_debug[:200],
+            "enrich_enabled": ENABLE_NAME_ENRICH,
+            "enrich_min_conf": ENRICH_MIN_CONF,
         }
 
     return parsed
@@ -594,7 +879,7 @@ class InstacartCreateListRequest(BaseModel):
     items: list[InstacartLineItem]
 
 
-# ✅ FIX: accept common path variants so the app doesn't 404 if it uses underscores or trailing slashes
+# accept common path variants so the app doesn't 404 if it uses underscores or trailing slashes
 @app.post("/instacart/create-list")
 @app.post("/instacart/create-list/")
 @app.post("/instacart/create_list")
@@ -668,7 +953,7 @@ def _trim_caches_if_needed() -> None:
     _IMAGE_CONTENT_TYPE_CACHE.clear()
 
 
-async def fetch_image(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, str] | None:
+async def fetch_image(url: str, headers: dict[str, str] | None = None) -> Optional[Tuple[bytes, str]]:
     try:
         async with httpx.AsyncClient(
             timeout=12.0,
