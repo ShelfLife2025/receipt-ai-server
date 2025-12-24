@@ -14,7 +14,7 @@ Core goals:
 4) BEST-EFFORT "full name enrichment" to get closer to branded product names:
    - Optional learned mapping (store-specific translations)
    - Optional Open Food Facts search (no key required)
-   - Confidence gating + caching (never confidently guess wrong)
+   - Confidence gating + caching (never confidently guess wrong, unless you enable FORCE mode)
 5) Return only grocery items (Food) by default (existing behavior).
 """
 
@@ -28,7 +28,7 @@ import time
 import base64
 import urllib.parse
 import difflib
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, List
 
 import httpx
 from pydantic import BaseModel
@@ -132,9 +132,6 @@ PER_UNIT_PRICE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# word token that looks like a real item word (>=2 letters)
-REAL_WORD_RE = re.compile(r"[A-Za-z]{2,}")
-
 # “words” that should NOT count as an item word
 STOP_ITEM_WORDS = {
     "lb", "lbs", "oz", "g", "kg", "ct", "ea", "each",
@@ -219,7 +216,31 @@ def title_case(s: str) -> str:
     return " ".join(out).strip()
 
 
-# -------- NEW: early junk-line gate (reduces OCR noise before item parsing) --------
+def _is_header_or_address(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return True
+
+    if PHONEISH_RE.search(s):
+        return True
+    if ZIP_RE.search(s):
+        return True
+    if DATE_RE.search(s) or TIME_RE.search(s):
+        return True
+
+    if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
+        return True
+
+    if STATE_RE.search(s):
+        words = re.findall(r"[A-Za-z]+", s)
+        has_money = bool(MONEY_TOKEN_RE.search(s))
+        if 2 <= len(words) <= 12 and not has_money:
+            return True
+
+    return False
+
+
+# -------- early junk-line gate (reduces OCR noise before item parsing) --------
 def _is_junk_line_gate(line: str) -> bool:
     s = (line or "").strip()
     if not s:
@@ -250,134 +271,6 @@ def _is_junk_line_gate(line: str) -> bool:
     digits = len(re.findall(r"\d", s))
     if digits >= 4 and letters <= 2:
         return True
-
-    return False
-
-
-# ---------------- ABBREVIATION EXPANSION ----------------
-
-ABBREV_TOKEN_MAP: dict[str, str] = {
-    # dairy
-    "crm": "cream",
-    "chs": "cheese",
-    "whp": "whipping",
-    "whp.": "whipping",
-    "hvy": "heavy",
-    "hvy.": "heavy",
-    "sour": "sour",
-    "cr": "cream",
-    "chs.": "cheese",
-    "bttr": "butter",
-    "marg": "margarine",
-    "yog": "yogurt",
-
-    # pantry / staples
-    "veg": "vegetable",
-    "org": "organic",
-    "wb": "whole",
-    "grd": "ground",
-    "bf": "beef",
-    "chk": "chicken",
-    "brst": "breast",
-    "flr": "flour",
-    "pdr": "powdered",
-    "sug": "sugar",
-    "brn": "brown",
-    "van": "vanilla",
-    "ext": "extract",
-    "vngr": "vinegar",
-
-    # household-ish
-    "alc": "alcohol",
-    "iso": "isopropyl",
-    "isoprop": "isopropyl",
-    "isopropyl": "isopropyl",
-}
-
-PHRASE_MAP: dict[str, str] = {
-    "half and half": "half-and-half",
-    "h and h": "half-and-half",
-    "hnh": "half-and-half",
-    "hf and hf": "half-and-half",
-
-    "heavy whipping cream": "heavy whipping cream",
-    "cream cheese": "cream cheese",
-    "sour cream": "sour cream",
-
-    "ground beef": "ground beef",
-    "chicken breast": "chicken breast",
-
-    "olive oil": "olive oil",
-    "vegetable oil": "vegetable oil",
-
-    "all purpose flour": "all-purpose flour",
-    "powdered sugar": "powdered sugar",
-    "brown sugar": "brown sugar",
-    "vanilla extract": "vanilla extract",
-    "apple cider vinegar": "apple cider vinegar",
-    "balsamic vinegar": "balsamic vinegar",
-}
-
-
-def _normalize_for_phrase_match(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = s.replace("&", " and ")
-    s = re.sub(r"[^a-z0-9\s]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def expand_abbreviations(name: str) -> str:
-    """
-    Expands common receipt abbreviations and preserves multi-word phrases via PHRASE_MAP.
-    Returns a normalized lowercase-ish string (matching existing behavior).
-    """
-    if not name:
-        return ""
-
-    raw = (name or "").strip()
-    raw = raw.replace("&", " and ")
-    raw = raw.replace("-", " ")
-    raw = re.sub(r"[^\w\s]", " ", raw)
-    raw = re.sub(r"\s+", " ", raw).strip()
-
-    toks = [t for t in raw.split(" ") if t]
-    expanded: list[str] = []
-    for t in toks:
-        tl = t.lower()
-        expanded.append(ABBREV_TOKEN_MAP.get(tl, tl))
-
-    joined = " ".join(expanded).strip()
-    norm = _normalize_for_phrase_match(joined)
-
-    for k in sorted(PHRASE_MAP.keys(), key=lambda x: len(x.split()), reverse=True):
-        if k in norm:
-            norm = re.sub(rf"\b{re.escape(k)}\b", PHRASE_MAP[k], norm)
-
-    norm = re.sub(r"\s+", " ", norm).strip()
-    return norm
-
-
-def _is_header_or_address(line: str) -> bool:
-    s = (line or "").strip()
-    if not s:
-        return True
-
-    if PHONEISH_RE.search(s):
-        return True
-    if ZIP_RE.search(s):
-        return True
-    if DATE_RE.search(s) or TIME_RE.search(s):
-        return True
-
-    if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
-        return True
-
-    if STATE_RE.search(s):
-        words = re.findall(r"[A-Za-z]+", s)
-        has_money = bool(MONEY_TOKEN_RE.search(s))
-        if 2 <= len(words) <= 12 and not has_money:
-            return True
 
     return False
 
@@ -504,12 +397,157 @@ def _image_url_for_item(base_url: str, name: str) -> str:
     return f"{base_url}/image?name={qname}"
 
 
+# ---------------- STORE HINT (helps Publix / store-brand matching) ----------------
+
+STORE_HINTS: list[tuple[str, re.Pattern]] = [
+    ("publix", re.compile(r"\bpublix\b", re.IGNORECASE)),
+    ("walmart", re.compile(r"\bwalmart\b|\bwal[-\s]*mart\b", re.IGNORECASE)),
+    ("target", re.compile(r"\btarget\b", re.IGNORECASE)),
+    ("costco", re.compile(r"\bcostco\b", re.IGNORECASE)),
+    ("kroger", re.compile(r"\bkroger\b", re.IGNORECASE)),
+    ("aldi", re.compile(r"\baldi\b", re.IGNORECASE)),
+    ("whole foods", re.compile(r"\bwhole\s+foods\b", re.IGNORECASE)),
+    ("trader joe's", re.compile(r"\btrader\s+joe'?s\b", re.IGNORECASE)),
+]
+
+
+def detect_store_hint(raw_lines: list[str]) -> str:
+    blob = " \n ".join(raw_lines[:80]).lower()
+    for name, pat in STORE_HINTS:
+        if pat.search(blob):
+            return name
+    return ""
+
+
+# ---------------- ABBREVIATION EXPANSION ----------------
+
+ABBREV_TOKEN_MAP: dict[str, str] = {
+    # store-brand tokens (high impact for Publix)
+    "pblx": "publix",
+    "publx": "publix",
+    "pub": "publix",
+    "pbl": "publix",
+
+    # dairy
+    "crm": "cream",
+    "chs": "cheese",
+    "whp": "whipping",
+    "whp.": "whipping",
+    "hvy": "heavy",
+    "hvy.": "heavy",
+    "sour": "sour",
+    "cr": "cream",
+    "chs.": "cheese",
+    "bttr": "butter",
+    "marg": "margarine",
+    "yog": "yogurt",
+
+    # pantry / staples
+    "veg": "vegetable",
+    "org": "organic",
+    "wb": "whole",
+    "grd": "ground",
+    "bf": "beef",
+    "chk": "chicken",
+    "ckn": "chicken",
+    "chkn": "chicken",
+    "brst": "breast",
+    "bnls": "boneless",
+    "sknls": "skinless",
+    "flr": "flour",
+    "pdr": "powdered",
+    "sug": "sugar",
+    "brn": "brown",
+    "van": "vanilla",
+    "ext": "extract",
+    "vngr": "vinegar",
+
+    # household-ish
+    "alc": "alcohol",
+    "iso": "isopropyl",
+    "isoprop": "isopropyl",
+    "isopropyl": "isopropyl",
+}
+
+PHRASE_MAP: dict[str, str] = {
+    "half and half": "half-and-half",
+    "h and h": "half-and-half",
+    "hnh": "half-and-half",
+    "hf and hf": "half-and-half",
+
+    "heavy whipping cream": "heavy whipping cream",
+    "cream cheese": "cream cheese",
+    "sour cream": "sour cream",
+
+    "ground beef": "ground beef",
+    "chicken breast": "chicken breast",
+    "boneless chicken breast": "boneless chicken breast",
+    "boneless skinless chicken breast": "boneless skinless chicken breast",
+
+    "olive oil": "olive oil",
+    "vegetable oil": "vegetable oil",
+
+    "all purpose flour": "all-purpose flour",
+    "powdered sugar": "powdered sugar",
+    "brown sugar": "brown sugar",
+    "vanilla extract": "vanilla extract",
+    "apple cider vinegar": "apple cider vinegar",
+    "balsamic vinegar": "balsamic vinegar",
+}
+
+
+def _normalize_for_phrase_match(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = s.replace("&", " and ")
+    s = re.sub(r"[^a-z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def expand_abbreviations(name: str) -> str:
+    """
+    Expands common receipt abbreviations and preserves multi-word phrases via PHRASE_MAP.
+    Returns a normalized lowercase-ish string.
+    """
+    if not name:
+        return ""
+
+    raw = (name or "").strip()
+    raw = raw.replace("&", " and ")
+    raw = raw.replace("-", " ")
+    raw = re.sub(r"[^\w\s]", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    toks = [t for t in raw.split(" ") if t]
+    expanded: list[str] = []
+    for t in toks:
+        tl = t.lower()
+        expanded.append(ABBREV_TOKEN_MAP.get(tl, tl))
+
+    joined = " ".join(expanded).strip()
+    norm = _normalize_for_phrase_match(joined)
+
+    for k in sorted(PHRASE_MAP.keys(), key=lambda x: len(x.split()), reverse=True):
+        if k in norm:
+            norm = re.sub(rf"\b{re.escape(k)}\b", PHRASE_MAP[k], norm)
+
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
 # ---------------- NAME ENRICHMENT ----------------
 # Best-effort, confidence-gated, cached. Never blocks core functionality.
 
 ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
-ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.62"))  # tune per store
+
+# Default stays conservative; tune per store if you want more aggressive enrichment.
+ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.62"))
 ENRICH_TIMEOUT_SECONDS = float(os.getenv("ENRICH_TIMEOUT_SECONDS", "4.0"))
+
+# OPTIONAL: force “best effort” (returns best OFF candidate even if below ENRICH_MIN_CONF)
+# Use if you prioritize “full names everywhere” over being conservative.
+ENRICH_FORCE_BEST_EFFORT = (os.getenv("ENRICH_FORCE_BEST_EFFORT", "0").strip() == "1")
+ENRICH_FORCE_SCORE_FLOOR = float(os.getenv("ENRICH_FORCE_SCORE_FLOOR", "0.48"))
 
 # Learned mapping: store-specific translations (optional).
 # You can provide mappings via:
@@ -522,9 +560,12 @@ NAME_MAP_PATH = (os.getenv("NAME_MAP_PATH") or "/tmp/name_map.json").strip()
 _ENRICH_CACHE: dict[str, Tuple[float, str, str, float]] = {}  # key -> (expires_at, name, source, score)
 _ENRICH_CACHE_TTL = int(os.getenv("ENRICH_CACHE_TTL_SECONDS", "86400"))
 
-# Open Food Facts search (no key required)
-OFF_SEARCH_URL = "https://world.openfoodfacts.org/cgi/search.pl"
-OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "8"))
+# Open Food Facts search (no key required) — try US first, then world
+OFF_SEARCH_URLS: list[str] = [
+    (os.getenv("OFF_SEARCH_URL_US") or "https://us.openfoodfacts.org/cgi/search.pl").strip(),
+    (os.getenv("OFF_SEARCH_URL_WORLD") or "https://world.openfoodfacts.org/cgi/search.pl").strip(),
+]
+OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "20"))
 
 # Loaded learned mappings
 _LEARNED_MAP: dict[str, str] = {}
@@ -575,141 +616,240 @@ def _enrich_cache_set(key: str, name: str, source: str, score: float) -> None:
     _ENRICH_CACHE[key] = (time.time() + _ENRICH_CACHE_TTL, name, source, score)
 
 
-def _score_candidate(query: str, candidate: str) -> float:
+_ENRICH_SCORE_STOPWORDS = {
+    "the", "and", "or", "of", "a", "an", "with", "for",
+    "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
+}
+
+
+def _tokenize_for_score(s: str) -> list[str]:
+    k = dedupe_key(s)
+    toks = [t for t in k.split() if t and t not in _ENRICH_SCORE_STOPWORDS]
+    return toks
+
+
+def _has_any_digits(s: str) -> bool:
+    return bool(re.search(r"\d", s or ""))
+
+
+def _score_candidate(query: str, candidate: str, store_hint: str = "") -> float:
     """
     Score how well a candidate full name matches a receipt-derived query.
-    Mix of token overlap and fuzzy similarity. Range approx [0, 1].
+    Range approx [0, 1].
+    Conservative: requires some real overlap, not just fuzzy similarity.
     """
     q = dedupe_key(query)
     c = dedupe_key(candidate)
     if not q or not c:
         return 0.0
 
-    q_tokens = set(q.split())
-    c_tokens = set(c.split())
-    if not q_tokens:
+    q_toks = _tokenize_for_score(q)
+    c_toks = _tokenize_for_score(c)
+    if not q_toks or not c_toks:
         return 0.0
 
-    overlap = len(q_tokens & c_tokens) / max(len(q_tokens), 1)
+    q_set = set(q_toks)
+    c_set = set(c_toks)
+
+    overlap = len(q_set & c_set) / max(len(q_set), 1)
     fuzzy = difflib.SequenceMatcher(None, q, c).ratio()
 
-    # Overlap is more important than fuzzy (prevents random false positives)
-    return 0.65 * overlap + 0.35 * fuzzy
+    # If there is almost no overlap, do not allow fuzzy to “hallucinate” a match.
+    if overlap < 0.28 and fuzzy < 0.55:
+        return 0.0
+
+    score = 0.70 * overlap + 0.30 * fuzzy
+
+    # Store hint boost (helps Publix store-brand matches)
+    if store_hint:
+        sh = dedupe_key(store_hint)
+        if sh and sh in c:
+            score += 0.06
+        if sh and sh in q and sh in c:
+            score += 0.04
+
+    # Size/quantity alignment boost (numbers in both is a good sign)
+    if _has_any_digits(query) and _has_any_digits(candidate):
+        score += 0.03
+
+    return max(0.0, min(1.0, score))
 
 
-def _learned_map_lookup(raw_line: str, cleaned_name: str) -> Optional[str]:
+def _learned_map_lookup(raw_line: str, cleaned_name: str, store_hint: str = "") -> Optional[str]:
     """
     Lookup using multiple keys to maximize hit-rate:
     - Exact raw line (trimmed)
     - Deduped raw line
     - Cleaned/expanded name key
+    - Store-prefixed variants (helps when you keep per-store maps)
     """
     raw = (raw_line or "").strip()
     if not raw:
         return None
 
-    keys = [
+    base_keys = [
         raw,
         dedupe_key(raw),
         cleaned_name,
         dedupe_key(cleaned_name),
     ]
+
+    keys: list[str] = []
+    for k in base_keys:
+        if not k:
+            continue
+        keys.append(k)
+        if store_hint:
+            keys.append(f"{store_hint}:{k}")
+            keys.append(f"{dedupe_key(store_hint)}:{k}")
+
     for k in keys:
         if not k:
             continue
-        if k in _LEARNED_MAP and _LEARNED_MAP[k].strip():
-            return _LEARNED_MAP[k].strip()
+        v = _LEARNED_MAP.get(k)
+        if v and str(v).strip():
+            return str(v).strip()
     return None
 
 
-async def _openfoodfacts_best_match(name: str) -> Optional[Tuple[str, float]]:
+def _build_off_candidate(p: dict[str, Any]) -> str:
+    # Prefer english name when present
+    product_name = (p.get("product_name_en") or p.get("product_name") or "").strip()
+    brands = (p.get("brands") or "").strip()
+    qty = (p.get("quantity") or "").strip()
+
+    # Some OFF entries have very long brand lists; keep it short-ish
+    if "," in brands:
+        brands = brands.split(",")[0].strip()
+
+    candidate = " ".join(x for x in [brands, product_name, qty] if x).strip()
+    return candidate
+
+
+async def _openfoodfacts_best_match(name: str, store_hint: str = "") -> Optional[Tuple[str, float, str, str]]:
     """
-    Returns (best_candidate, score) from Open Food Facts search if any.
-    Best-effort; may return None if no confident match.
+    Returns (best_candidate, score, source_url, query_used) from Open Food Facts search if any.
+    Best-effort; may return None if no usable candidate.
     """
     key = dedupe_key(name)
-    if len(key) < 6:
+    if len(key) < 5:
         return None
 
-    params = {
-        "search_terms": name,
+    # Multiple query variants increase hit rate for store abbreviations.
+    variants: list[str] = []
+    variants.append(name)
+
+    if store_hint and dedupe_key(store_hint) not in key:
+        variants.append(f"{store_hint} {name}")
+
+    # Variant without “publix” word can sometimes match better if OFF has brand separate
+    if "publix" in key:
+        variants.append(re.sub(r"\bpublix\b", "", key).strip())
+
+    # Reduce duplicate whitespace and ensure uniqueness
+    seen: set[str] = set()
+    query_variants: list[str] = []
+    for v in variants:
+        v = re.sub(r"\s+", " ", (v or "").strip())
+        if not v:
+            continue
+        if v.lower() in seen:
+            continue
+        seen.add(v.lower())
+        query_variants.append(v)
+
+    params_base = {
         "search_simple": 1,
         "action": "process",
         "json": 1,
         "page_size": OFF_PAGE_SIZE,
+        # Sorting by popularity often helps
+        "sort_by": "unique_scans_n",
+        # Request fewer fields to speed up responses
+        "fields": "product_name,product_name_en,brands,quantity",
     }
-
-    try:
-        async with httpx.AsyncClient(timeout=ENRICH_TIMEOUT_SECONDS, follow_redirects=True) as client:
-            r = await client.get(OFF_SEARCH_URL, params=params, headers={"User-Agent": "ShelfLife/1.0"})
-        r.raise_for_status()
-        data = r.json()
-        products = data.get("products") or []
-    except Exception:
-        return None
-
-    if not products:
-        return None
 
     best_name: Optional[str] = None
     best_score = 0.0
+    best_url = ""
+    best_query = ""
 
-    for p in products[:OFF_PAGE_SIZE]:
-        product_name = (p.get("product_name") or "").strip()
-        brands = (p.get("brands") or "").strip()
-        qty = (p.get("quantity") or "").strip()
+    for q in query_variants:
+        params = dict(params_base)
+        params["search_terms"] = q
 
-        if not product_name:
-            continue
+        for url in OFF_SEARCH_URLS:
+            if not url:
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=ENRICH_TIMEOUT_SECONDS, follow_redirects=True) as client:
+                    r = await client.get(url, params=params, headers={"User-Agent": "ShelfLife/1.0"})
+                r.raise_for_status()
+                data = r.json()
+                products = data.get("products") or []
+            except Exception:
+                continue
 
-        candidate = " ".join(x for x in [brands, product_name, qty] if x).strip()
-        s = _score_candidate(name, candidate)
-        if s > best_score:
-            best_score = s
-            best_name = candidate
+            if not products:
+                continue
+
+            for p in products[:OFF_PAGE_SIZE]:
+                cand = _build_off_candidate(p)
+                if not cand:
+                    continue
+
+                s = _score_candidate(q, cand, store_hint=store_hint)
+                if s > best_score:
+                    best_score = s
+                    best_name = cand
+                    best_url = url
+                    best_query = q
 
     if best_name:
-        return best_name, best_score
+        return best_name, best_score, best_url, best_query
     return None
 
 
-async def enrich_full_name(raw_line: str, expanded_name: str) -> Tuple[str, str, float]:
+async def enrich_full_name(raw_line: str, expanded_name: str, store_hint: str = "") -> Tuple[str, str, float, str]:
     """
-    Best-effort enrichment. Returns (name, source, score).
-    Sources: learned_map | openfoodfacts | none
+    Best-effort enrichment. Returns (name, source, score, query_used).
+    Sources: learned_map | openfoodfacts | openfoodfacts_forced | none
     """
-    # Do nothing if disabled
     if not ENABLE_NAME_ENRICH:
-        return expanded_name, "none", 0.0
+        return expanded_name, "none", 0.0, ""
 
-    # Cache by expanded name key (stable across OCR noise)
-    cache_key = dedupe_key(expanded_name)
+    # Cache by expanded name key + store hint (more stable for store-brand)
+    cache_key = dedupe_key(f"{store_hint}:{expanded_name}" if store_hint else expanded_name)
     if cache_key:
         cached = _enrich_cache_get(cache_key)
         if cached:
-            return cached[0], cached[1], cached[2]
+            return cached[0], cached[1], cached[2], ""
 
     # 1) Learned map (highest precision)
-    learned = _learned_map_lookup(raw_line, expanded_name)
+    learned = _learned_map_lookup(raw_line, expanded_name, store_hint=store_hint)
     if learned:
-        # Score as max; it's explicitly curated
         if cache_key:
             _enrich_cache_set(cache_key, learned, "learned_map", 1.0)
-        return learned, "learned_map", 1.0
+        return learned, "learned_map", 1.0, ""
 
     # 2) Open Food Facts (best-effort)
-    off = await _openfoodfacts_best_match(expanded_name)
+    off = await _openfoodfacts_best_match(expanded_name, store_hint=store_hint)
     if off:
-        candidate, score = off
+        candidate, score, _url, query_used = off
         if score >= ENRICH_MIN_CONF:
             if cache_key:
                 _enrich_cache_set(cache_key, candidate, "openfoodfacts", score)
-            return candidate, "openfoodfacts", score
+            return candidate, "openfoodfacts", score, query_used
 
-    # Fallback
+        # Optional “forced” best-effort mode (for “full names everywhere”)
+        if ENRICH_FORCE_BEST_EFFORT and score >= ENRICH_FORCE_SCORE_FLOOR:
+            if cache_key:
+                _enrich_cache_set(cache_key, candidate, "openfoodfacts_forced", score)
+            return candidate, "openfoodfacts_forced", score, query_used
+
     if cache_key:
         _enrich_cache_set(cache_key, expanded_name, "none", 0.0)
-    return expanded_name, "none", 0.0
+    return expanded_name, "none", 0.0, ""
 
 
 # ---------------- OCR ----------------
@@ -783,6 +923,8 @@ async def parse_receipt(
     lines = [ln for ln in lines if ln]
     raw_lines = lines[:]  # keep original for debug counts
 
+    store_hint = detect_store_hint(raw_lines)
+
     # early junk-line gate
     lines = [ln for ln in lines if not _is_junk_line_gate(ln)]
 
@@ -805,11 +947,14 @@ async def parse_receipt(
         # baseline expansion
         expanded = expand_abbreviations(name)
 
-        # best-effort full-name enrichment
-        enriched, source, score = await enrich_full_name(raw_line=ln, expanded_name=expanded)
+        # best-effort full-name enrichment (store-aware)
+        enriched, source, score, query_used = await enrich_full_name(
+            raw_line=ln,
+            expanded_name=expanded,
+            store_hint=store_hint,
+        )
 
-        # Continue pipeline on the enriched name (still filtered/gated as before)
-        final_name = enriched.strip()
+        final_name = (enriched or "").strip()
 
         if debug:
             enrich_debug.append(
@@ -821,6 +966,7 @@ async def parse_receipt(
                     "name_enriched": enriched,
                     "enrich_source": source,
                     "enrich_score": score,
+                    "enrich_query_used": query_used,
                 }
             )
 
@@ -858,9 +1004,14 @@ async def parse_receipt(
             "kept_line_count": len(kept),
             "kept_lines": kept[:200],
             "base_url": base_url,
+            "store_hint": store_hint,
             "enrichment_debug": enrich_debug[:200],
             "enrich_enabled": ENABLE_NAME_ENRICH,
             "enrich_min_conf": ENRICH_MIN_CONF,
+            "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
+            "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
+            "off_page_size": OFF_PAGE_SIZE,
+            "off_search_urls": OFF_SEARCH_URLS,
         }
 
     return parsed
