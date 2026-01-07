@@ -166,7 +166,7 @@ STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY
 # Allow dot or comma decimals for OCR
 UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
 
-# --- IMPORTANT FIX: OCR-tolerant money patterns ---
+# OCR-tolerant money patterns:
 # Matches: 3.99, 3,99, 3. 99, $ 3.99, and "3 99" (OCR drops the decimal).
 MONEY_TOKEN_RE = re.compile(
     r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|\b\d{1,6}\s+\d{2}\b"
@@ -325,7 +325,7 @@ def _looks_like_item(line: str) -> bool:
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
 
-    # --- IMPORTANT FIX: strip OCR-style trailing prices ---
+    # Strip OCR-style trailing prices:
     # Handles: " 3.99", " 3,99", " 3. 99", "$ 3.99", and " 3 99"
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
@@ -929,7 +929,9 @@ def health() -> dict[str, Any]:
     return {"ok": True}
 
 
+# IMPORTANT FIX 1: accept both /parse-receipt and /parse-receipt/
 @app.post("/parse-receipt")
+@app.post("/parse-receipt/")
 async def parse_receipt(
     request: Request,
     file: UploadFile = File(...),
@@ -937,6 +939,7 @@ async def parse_receipt(
 ):
     """
     Returns ONLY grocery items (Food) and includes image_url for each item.
+    IMPORTANT FIX 2: Always returns {"items": [...]} (even when debug=false)
     """
     raw = await file.read()
     if not raw:
@@ -959,7 +962,6 @@ async def parse_receipt(
 
     store_hint = detect_store_hint(raw_lines)
 
-    # Debug: capture why lines are dropped (helps you confirm the scanner is gating correctly)
     dropped_lines: list[dict[str, Any]] = []
 
     # early junk-line gate (tracked)
@@ -1074,7 +1076,8 @@ async def parse_receipt(
             "debug": {"dropped_lines": dropped_lines[:200]},
         }
 
-    return parsed
+    # IMPORTANT FIX 2: always wrap response
+    return {"items": parsed}
 
 
 # ============================================================
