@@ -163,13 +163,23 @@ ADDR_SUFFIX_RE = re.compile(
 DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNORECASE)
 STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b")
 
-UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\d+(?:\.\d{1,2})?\b", re.IGNORECASE)
-MONEY_TOKEN_RE = re.compile(r"\$?\d{1,6}(?:\.\d{2})\b")
-ONLY_MONEYISH_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})?\s*$")
-PRICE_FLAG_RE = re.compile(r"^\s*\$?\d+(?:\.\d{2})\s*[A-Za-z]{1,2}\s*$")
+# Allow dot or comma decimals for OCR
+UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
 
-WEIGHT_ONLY_RE = re.compile(r"^\s*\$?\d+(?:\.\d+)?\s*(lb|lbs|oz|g|kg|ct)\s*$", re.IGNORECASE)
-PER_UNIT_PRICE_RE = re.compile(r"\b\d+(?:\.\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", re.IGNORECASE)
+# --- IMPORTANT FIX: OCR-tolerant money patterns ---
+# Matches: 3.99, 3,99, 3. 99, $ 3.99, and "3 99" (OCR drops the decimal).
+MONEY_TOKEN_RE = re.compile(
+    r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|\b\d{1,6}\s+\d{2}\b"
+)
+ONLY_MONEYISH_RE = re.compile(
+    r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})?\s*$|^\s*\d+\s+\d{2}\s*$"
+)
+PRICE_FLAG_RE = re.compile(
+    r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{1,2}\s*$|^\s*\d+\s+\d{2}\s*[A-Za-z]{1,2}\s*$"
+)
+
+WEIGHT_ONLY_RE = re.compile(r"^\s*\$?\d+(?:[.,]\s*\d+)?\s*(lb|lbs|oz|g|kg|ct)\s*$", re.IGNORECASE)
+PER_UNIT_PRICE_RE = re.compile(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", re.IGNORECASE)
 
 STOP_ITEM_WORDS = {
     "lb", "lbs", "oz", "g", "kg", "ct", "ea", "each",
@@ -314,10 +324,15 @@ def _looks_like_item(line: str) -> bool:
 
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
-    s = re.sub(r"\s+\$?\d+(?:\.\d{2})\s*$", "", s)
+
+    # --- IMPORTANT FIX: strip OCR-style trailing prices ---
+    # Handles: " 3.99", " 3,99", " 3. 99", "$ 3.99", and " 3 99"
+    s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
+    s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
+
     s = UNIT_PRICE_RE.sub("", s).strip()
-    s = re.sub(r"(?:\s+\$?\d+(?:\.\d{2}))+\s*$", "", s).strip()
-    s = re.sub(r"\b\d+(?:\.\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2}))+\s*$", "", s).strip()
+    s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -377,7 +392,7 @@ def _image_url_for_item(base_url: str, name: str) -> str:
 
 
 # ============================================================
-# NEW: Price-aware keep gate (reduces random receipt junk)
+# Price-aware keep gate (reduces random receipt junk)
 # ============================================================
 
 def _raw_line_has_price_or_qty_hint(s: str) -> bool:
@@ -385,20 +400,18 @@ def _raw_line_has_price_or_qty_hint(s: str) -> bool:
     Item lines almost always contain a price token or unit-price token.
     We require one of these hints BEFORE we even try _looks_like_item.
     This removes most random headers, promos, rewards lines, etc.
+
+    IMPORTANT: This is OCR-tolerant via MONEY_TOKEN_RE + UNIT_PRICE_RE.
     """
     if not s:
         return False
 
-    # Has a price like 3.99 or $3.99 (anywhere in the raw OCR line)
     if MONEY_TOKEN_RE.search(s):
         return True
 
-    # "2 @ 3.99" style
     if UNIT_PRICE_RE.search(s):
         return True
 
-    # Qty hints that sometimes appear with/without explicit trailing prices
-    # "x2" or "2x"
     if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
         return True
 
@@ -875,8 +888,9 @@ async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str,
 # ============================================================
 
 def _preprocess_image_bytes(data: bytes) -> bytes:
-    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
     img = ImageOps.grayscale(img)
     img = ImageOps.autocontrast(img)
     img = img.filter(ImageFilter.SHARPEN)
@@ -945,20 +959,46 @@ async def parse_receipt(
 
     store_hint = detect_store_hint(raw_lines)
 
-    # early junk-line gate
-    lines = [ln for ln in lines if not _is_junk_line_gate(ln)]
+    # Debug: capture why lines are dropped (helps you confirm the scanner is gating correctly)
+    dropped_lines: list[dict[str, Any]] = []
 
-    # IMPORTANT CHANGE:
+    # early junk-line gate (tracked)
+    filtered: list[str] = []
+    for ln in lines:
+        if _is_junk_line_gate(ln):
+            if debug:
+                dropped_lines.append({"line": ln, "stage": "junk_gate"})
+            continue
+        filtered.append(ln)
+    lines = filtered
+
     # Keep BOTH raw and cleaned lines, and require price/qty hints on the raw line
     kept: list[tuple[str, str]] = []  # (raw_line, cleaned_line)
     for ln in lines:
         raw_ln = ln
+
         if not _raw_line_has_price_or_qty_hint(raw_ln):
+            if debug:
+                dropped_lines.append({"line": raw_ln, "stage": "price_hint"})
             continue
-        if _looks_like_item(raw_ln):
-            cleaned = _clean_line(raw_ln)
-            if cleaned and _looks_like_item(cleaned):
-                kept.append((raw_ln, cleaned))
+
+        if not _looks_like_item(raw_ln):
+            if debug:
+                dropped_lines.append({"line": raw_ln, "stage": "looks_like_item_raw"})
+            continue
+
+        cleaned = _clean_line(raw_ln)
+        if not cleaned:
+            if debug:
+                dropped_lines.append({"line": raw_ln, "stage": "clean_line_empty"})
+            continue
+
+        if not _looks_like_item(cleaned):
+            if debug:
+                dropped_lines.append({"line": raw_ln, "stage": "looks_like_item_clean", "cleaned": cleaned})
+            continue
+
+        kept.append((raw_ln, cleaned))
 
     parsed: list[dict[str, Any]] = []
     enrich_debug: list[dict[str, Any]] = []
@@ -969,8 +1009,6 @@ async def parse_receipt(
 
         expanded = expand_abbreviations(name_cleaned)
 
-        # IMPORTANT CHANGE:
-        # use the REAL raw line for learned-map lookup + better pending examples
         enriched, source, score, query_used = await enrich_full_name(
             raw_line=raw_ln,
             cleaned_name=name_cleaned,
@@ -1020,11 +1058,8 @@ async def parse_receipt(
         return {
             "items": parsed,
             "raw_line_count": len(raw_lines),
-
-            # IMPORTANT CHANGE: kept is now tuples
             "kept_line_count": len(kept),
             "kept_lines": [c for (_r, c) in kept][:200],
-
             "base_url": base_url,
             "store_hint": store_hint,
             "enrichment_debug": enrich_debug[:200],
@@ -1036,6 +1071,7 @@ async def parse_receipt(
             "off_search_urls": OFF_SEARCH_URLS,
             "learned_map_entries": len(_LEARNED_MAP),
             "pending_entries": len(_PENDING),
+            "debug": {"dropped_lines": dropped_lines[:200]},
         }
 
     return parsed
@@ -1303,4 +1339,3 @@ async def _log_requests(request: Request, call_next):
         return resp
     finally:
         print(f"{request.method} {request.url.path}")
-
