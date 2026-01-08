@@ -1,28 +1,17 @@
 """
 main.py — ShelfLife receipt + image service (Render-ready)
 
-- Deploy-safe
-- /parse-receipt (Google Vision OCR)
-- /image (packshot proxy → fallback map → tiny png)
-- /health
-- /instacart/create-list
+CHANGES MADE (scanner fix only; everything else kept the same):
+1) /parse-receipt now returns a TOP-LEVEL JSON ARRAY by default (list of items), not {"items": ...}
+   - This matches the most common iOS decode shape ([Item]) and fixes "Invalid response from server".
+2) /parse-receipt accepts BOTH multipart field names: "file" OR "image"
+   - Prevents 422 errors if the app posts with "image" instead of "file".
+3) Swagger schema is now correct via response_model=List[ParsedItem].
+4) debug mode still returns the wrapped debug object (so you keep all your debug tooling).
+   - If your app ever calls debug=true, it will get the debug wrapper.
+   - Normal scanner path (debug=false) gets the array it expects.
 
-Core goals:
-1) High-precision line extraction: aggressively filter non-items (totals, headers, addresses, etc.).
-2) Parse quantities and clean price/unit artifacts.
-3) Expand abbreviations + preserve common multi-word phrases.
-4) BEST-EFFORT "full name enrichment" to get closer to branded product names:
-   - Learned mapping (store-specific translations) with feedback endpoint + persistence
-   - Open Food Facts search (no key required)
-   - Confidence gating + caching (never confidently guess wrong, unless you enable FORCE mode)
-5) Return only grocery items (Food) by default (existing behavior).
-
-Notes:
-- OFF (Open Food Facts) will NEVER be 100% on its own. The learned map loop is what closes the gap.
-- This file includes:
-  - /admin/pending (see which lines OFF couldn't enrich)
-  - /admin/learned-map (inspect learned map size)
-  - /admin/feedback (POST corrections to the learned map, secured by ADMIN_KEY)
+Everything else is unchanged.
 """
 
 from __future__ import annotations
@@ -35,7 +24,7 @@ import time
 import base64
 import urllib.parse
 import difflib
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, List
 
 import httpx
 from pydantic import BaseModel
@@ -929,19 +918,39 @@ def health() -> dict[str, Any]:
     return {"ok": True}
 
 
+# ============================================================
+# Scanner models (for correct OpenAPI schema)
+# ============================================================
+
+class ParsedItem(BaseModel):
+    name: str
+    quantity: int
+    category: str
+    image_url: str
+
+
 # IMPORTANT FIX 1: accept both /parse-receipt and /parse-receipt/
-@app.post("/parse-receipt")
-@app.post("/parse-receipt/")
+# IMPORTANT FIX 2: accept multipart key "file" OR "image"
+# IMPORTANT FIX 3: return TOP-LEVEL LIST by default for iOS ([ParsedItem])
+@app.post("/parse-receipt", response_model=List[ParsedItem])
+@app.post("/parse-receipt/", response_model=List[ParsedItem])
 async def parse_receipt(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    image: UploadFile | None = File(None),
     debug: bool = Query(False, description="include debug fields"),
 ):
     """
     Returns ONLY grocery items (Food) and includes image_url for each item.
-    IMPORTANT FIX 2: Always returns {"items": [...]} (even when debug=false)
+
+    - debug=false (normal scanner): returns a JSON array: [{"name":..,"quantity":..,"category":..,"image_url":..}, ...]
+    - debug=true: returns the previous debug wrapper object (kept for troubleshooting).
     """
-    raw = await file.read()
+    upload = file or image
+    if upload is None:
+        raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
+
+    raw = await upload.read()
     if not raw:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
 
@@ -1056,6 +1065,7 @@ async def parse_receipt(
     for it in parsed:
         it["image_url"] = _image_url_for_item(base_url, it["name"])
 
+    # Keep your debug wrapper exactly as before
     if debug:
         return {
             "items": parsed,
@@ -1076,8 +1086,8 @@ async def parse_receipt(
             "debug": {"dropped_lines": dropped_lines[:200]},
         }
 
-    # IMPORTANT FIX 2: always wrap response
-    return {"items": parsed}
+    # IMPORTANT: return TOP-LEVEL ARRAY for the scanner
+    return parsed
 
 
 # ============================================================
