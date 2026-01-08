@@ -1,19 +1,3 @@
-"""
-main.py — ShelfLife receipt + image service (Render-ready)
-
-CHANGES MADE (scanner fix only; everything else kept the same):
-1) /parse-receipt now returns a TOP-LEVEL JSON ARRAY by default (list of items), not {"items": ...}
-   - This matches the most common iOS decode shape ([Item]) and fixes "Invalid response from server".
-2) /parse-receipt accepts BOTH multipart field names: "file" OR "image"
-   - Prevents 422 errors if the app posts with "image" instead of "file".
-3) Swagger schema is now correct via response_model=List[ParsedItem].
-4) debug mode still returns the wrapped debug object (so you keep all your debug tooling).
-   - IMPORTANT: debug responses are returned as JSONResponse to bypass response_model validation.
-5) Prevent common iPhone photo 500s:
-   - If the upload is HEIC/HEIF and Pillow can’t decode it on Render, return 415 with a clear message
-     (instead of crashing with 500).
-"""
-
 from __future__ import annotations
 
 import os
@@ -33,16 +17,6 @@ from fastapi.responses import JSONResponse, Response
 from PIL import Image, ImageOps, ImageFilter
 
 from google.cloud import vision
-
-# Optional HEIC support (only works if pillow-heif is installed in your Render env)
-try:
-    import pillow_heif  # type: ignore
-
-    pillow_heif.register_heif_opener()
-    _HEIF_ENABLED = True
-except Exception:
-    _HEIF_ENABLED = False
-
 
 # ============================================================
 # App + Lifespan clients (re-use connections; much faster)
@@ -267,31 +241,6 @@ def _is_header_or_address(line: str) -> bool:
     return False
 
 
-def _is_junk_line_gate(line: str) -> bool:
-    s = (line or "").strip()
-    if not s:
-        return True
-    if len(s) < 3:
-        return True
-    if not re.search(r"[A-Za-z]", s):
-        return True
-    if NOISE_RE.search(s):
-        return True
-    if _is_header_or_address(s):
-        return True
-    if ONLY_MONEYISH_RE.match(s):
-        return True
-    if PRICE_FLAG_RE.match(s):
-        return True
-    if WEIGHT_ONLY_RE.match(s):
-        return True
-    letters = len(re.findall(r"[A-Za-z]", s))
-    digits = len(re.findall(r"\d", s))
-    if digits >= 4 and letters <= 2:
-        return True
-    return False
-
-
 def _has_valid_item_words(line: str) -> bool:
     words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", line or "")]
     words = [w for w in words if w not in STOP_ITEM_WORDS]
@@ -331,12 +280,7 @@ def _clean_line(line: str) -> str:
 
     s = UNIT_PRICE_RE.sub("", s).strip()
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2}))+\s*$", "", s).strip()
-    s = re.sub(
-        r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b",
-        "",
-        s,
-        flags=re.IGNORECASE,
-    ).strip()
+    s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -396,29 +340,55 @@ def _image_url_for_item(base_url: str, name: str) -> str:
 
 
 # ============================================================
-# Price-aware keep gate (reduces random receipt junk)
+# Price-aware keep gate (for single-line items; we now also support lookahead)
 # ============================================================
 
 def _raw_line_has_price_or_qty_hint(s: str) -> bool:
-    """
-    Item lines almost always contain a price token or unit-price token.
-    We require one of these hints BEFORE we even try _looks_like_item.
-    This removes most random headers, promos, rewards lines, etc.
+    if not s:
+        return False
+    if MONEY_TOKEN_RE.search(s):
+        return True
+    if UNIT_PRICE_RE.search(s):
+        return True
+    if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
+        return True
+    return False
 
-    IMPORTANT: This is OCR-tolerant via MONEY_TOKEN_RE + UNIT_PRICE_RE.
+
+def _is_price_like_line(s: str) -> bool:
+    """
+    Publix-style price/flag lines:
+      - "9.99 F", "7.49 T", "5.99", "-5.26 F"
+      - "3 99" OCR decimals
+    Also covers money-only lines that should NOT be treated as items, but can be paired as hints.
     """
     if not s:
         return False
-
-    if MONEY_TOKEN_RE.search(s):
+    ss = (s or "").strip()
+    if ONLY_MONEYISH_RE.match(ss):
         return True
-
-    if UNIT_PRICE_RE.search(s):
+    if PRICE_FLAG_RE.match(ss):
         return True
-
-    if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
+    # allow negative discount lines like "-5.26 F"
+    if re.match(r"^\s*-\s*\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{0,2}\s*$", ss):
         return True
+    # OCR "3 99" with optional trailing flag
+    if re.match(r"^\s*\d+\s+\d{2}\s*[A-Za-z]{0,2}\s*$", ss):
+        return True
+    return False
 
+
+def _is_weight_or_unit_price_line(s: str) -> bool:
+    if not s:
+        return False
+    ss = (s or "").strip()
+    if UNIT_PRICE_RE.search(ss):
+        return True
+    if PER_UNIT_PRICE_RE.search(ss):
+        return True
+    # common Publix weight line: "1.92 lb @ 3.49/ lb"
+    if re.search(r"\blb\b", ss, flags=re.IGNORECASE) and ("@" in ss or "/" in ss):
+        return True
     return False
 
 
@@ -850,12 +820,7 @@ async def _openfoodfacts_best_match(name: str, store_hint: str = "") -> Optional
     return None
 
 
-async def enrich_full_name(
-    raw_line: str,
-    cleaned_name: str,
-    expanded_name: str,
-    store_hint: str = "",
-) -> Tuple[str, str, float, str]:
+async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str, store_hint: str = "") -> Tuple[str, str, float, str]:
     if not ENABLE_NAME_ENRICH:
         return expanded_name, "none", 0.0, ""
 
@@ -896,18 +861,6 @@ async def enrich_full_name(
 # OCR
 # ============================================================
 
-def _is_heic_bytes(data: bytes) -> bool:
-    """
-    HEIC/HEIF signature: ISO BMFF 'ftyp' with heic/heif/mif1/heix/hevc brands.
-    """
-    if not data or len(data) < 12:
-        return False
-    if data[4:8] != b"ftyp":
-        return False
-    brand = data[8:12]
-    return brand in {b"heic", b"heif", b"heix", b"hevc", b"mif1"}
-
-
 def _preprocess_image_bytes(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)
@@ -947,7 +900,7 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "heif_enabled": _HEIF_ENABLED}
+    return {"ok": True}
 
 
 # ============================================================
@@ -961,23 +914,17 @@ class ParsedItem(BaseModel):
     image_url: str
 
 
-# IMPORTANT FIX 1: accept both /parse-receipt and /parse-receipt/
-# IMPORTANT FIX 2: accept multipart key "file" OR "image"
-# IMPORTANT FIX 3: return TOP-LEVEL LIST by default for iOS ([ParsedItem])
+# NOTE:
+# - /parse-receipt always returns List[ParsedItem] (top-level array) to keep iOS decoding stable.
+# - /parse-receipt-debug returns the old debug wrapper for troubleshooting.
 @app.post("/parse-receipt", response_model=List[ParsedItem])
 @app.post("/parse-receipt/", response_model=List[ParsedItem])
 async def parse_receipt(
     request: Request,
-    file: Optional[UploadFile] = File(None),
-    image: Optional[UploadFile] = File(None),
-    debug: bool = Query(False, description="include debug fields"),
+    file: UploadFile | None = File(None),
+    image: UploadFile | None = File(None),
+    debug: bool = Query(False, description="accepted but does not change response shape (use /parse-receipt-debug for wrapper)"),
 ):
-    """
-    Returns ONLY grocery items (Food) and includes image_url for each item.
-
-    - debug=false (normal scanner): returns a JSON array: [{"name":..,"quantity":..,"category":..,"image_url":..}, ...]
-    - debug=true: returns the previous debug wrapper object (kept for troubleshooting).
-    """
     upload = file or image
     if upload is None:
         raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
@@ -985,16 +932,6 @@ async def parse_receipt(
     raw = await upload.read()
     if not raw:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
-
-    # If the iPhone sends HEIC and Render can't decode it, return a clear 415 instead of a 500.
-    if _is_heic_bytes(raw) and not _HEIF_ENABLED:
-        return JSONResponse(
-            status_code=415,
-            content={
-                "error": "Unsupported image format (HEIC/HEIF).",
-                "hint": "Please send JPG/PNG, or install 'pillow-heif' in the Render backend to support HEIC.",
-            },
-        )
 
     try:
         pre = _preprocess_image_bytes(raw)
@@ -1008,50 +945,271 @@ async def parse_receipt(
             },
         )
 
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    raw_lines = lines[:]
+    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    store_hint = detect_store_hint(raw_lines)
 
+    # ------------------------------------------------------------
+    # Filtering:
+    # - Drop obvious headers/addresses/noise
+    # - If a noise label is found, also drop the immediate next numeric value line (prevents pairing totals)
+    # - Keep price-like lines so they can be used as lookahead hints for the prior item line
+    # ------------------------------------------------------------
+
+    dropped_lines: list[dict[str, Any]] = []
+
+    lines: list[str] = raw_lines[:]
+    keep: list[str] = []
+    skip_next_value = False
+
+    for i, ln in enumerate(lines):
+        s = (ln or "").strip()
+        if not s:
+            continue
+
+        # If previous line was a totals-like noise label, drop the immediate numeric value line too.
+        if skip_next_value:
+            if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s):
+                dropped_lines.append({"line": s, "stage": "noise_value"})
+                skip_next_value = False
+                continue
+            skip_next_value = False  # only applies to the immediate next line
+
+        # Hard drops: header/address, or explicit noise labels
+        if _is_header_or_address(s):
+            dropped_lines.append({"line": s, "stage": "junk_gate"})
+            continue
+
+        if NOISE_RE.search(s):
+            dropped_lines.append({"line": s, "stage": "junk_gate"})
+            # drop the next numeric value line (Order Total -> 127.61)
+            skip_next_value = True
+            continue
+
+        # Otherwise keep (including price-like lines; needed for pairing)
+        keep.append(s)
+
+    lines = keep
+
+    # ------------------------------------------------------------
+    # Candidate extraction with lookahead pairing
+    # Publix pattern: ITEM_NAME then PRICE_LINE (or WEIGHT/UNIT line)
+    # ------------------------------------------------------------
+
+    kept: list[tuple[str, str]] = []  # (raw_item_line, cleaned_item_line)
+
+    i = 0
+    while i < len(lines):
+        cur = lines[i].strip()
+
+        # Never treat pure price/flag/weight lines as item lines.
+        if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
+            i += 1
+            continue
+
+        if not _looks_like_item(cur):
+            dropped_lines.append({"line": cur, "stage": "looks_like_item_raw"})
+            i += 1
+            continue
+
+        # If same line already has price/qty hint, accept.
+        has_hint = _raw_line_has_price_or_qty_hint(cur)
+
+        # Otherwise lookahead 1-2 lines for price/weight/unit-price hints.
+        consume = 0
+        n1 = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        n2 = lines[i + 2].strip() if i + 2 < len(lines) else ""
+
+        if not has_hint:
+            if n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or _raw_line_has_price_or_qty_hint(n1)):
+                has_hint = True
+                consume = 1
+            elif n1 and _is_weight_or_unit_price_line(n1) and n2 and _is_price_like_line(n2):
+                # weight/unit line then total price line
+                has_hint = True
+                consume = 2
+            elif n2 and (_is_price_like_line(n2) or _is_weight_or_unit_price_line(n2)):
+                # occasionally OCR inserts a short junk token between item and price
+                has_hint = True
+                consume = 2
+
+        if not has_hint:
+            dropped_lines.append({"line": cur, "stage": "price_hint"})
+            i += 1
+            continue
+
+        cleaned = _clean_line(cur)
+        if not cleaned:
+            dropped_lines.append({"line": cur, "stage": "clean_line_empty"})
+            i += 1 + consume
+            continue
+
+        if not _looks_like_item(cleaned):
+            dropped_lines.append({"line": cur, "stage": "looks_like_item_clean", "cleaned": cleaned})
+            i += 1 + consume
+            continue
+
+        kept.append((cur, cleaned))
+        i += 1 + consume
+
+    # ------------------------------------------------------------
+    # Parse items
+    # ------------------------------------------------------------
+
+    parsed: list[dict[str, Any]] = []
+    for raw_ln, cleaned_ln in kept:
+        qty, name = _parse_quantity(cleaned_ln)
+        name_cleaned = _clean_line(name)
+
+        expanded = expand_abbreviations(name_cleaned)
+
+        enriched, source, score, query_used = await enrich_full_name(
+            raw_line=raw_ln,
+            cleaned_name=name_cleaned,
+            expanded_name=expanded,
+            store_hint=store_hint,
+        )
+
+        final_name = (enriched or "").strip()
+        if not final_name:
+            continue
+        if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
+            continue
+        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
+            continue
+        if not _has_valid_item_words(final_name):
+            continue
+
+        category = _classify(final_name)
+        if category != "Food":
+            continue
+
+        parsed.append({"name": title_case(final_name), "quantity": int(qty), "category": category})
+
+    parsed = _dedupe_and_merge(parsed)
+
+    base_url = _public_base_url(request)
+    for it in parsed:
+        it["image_url"] = _image_url_for_item(base_url, it["name"])
+
+    # ALWAYS return top-level array for iOS decode stability
+    return parsed
+
+
+@app.post("/parse-receipt-debug")
+@app.post("/parse-receipt-debug/")
+async def parse_receipt_debug(
+    request: Request,
+    file: UploadFile | None = File(None),
+    image: UploadFile | None = File(None),
+    debug: bool = Query(True, description="kept for compatibility; this endpoint always returns wrapper"),
+):
+    """
+    Old debug wrapper endpoint (preserved).
+    Use this for troubleshooting; do NOT point the app's scanner decode at this endpoint.
+    """
+    upload = file or image
+    if upload is None:
+        raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
+
+    raw = await upload.read()
+    if not raw:
+        return JSONResponse(status_code=400, content={"error": "Empty file"})
+
+    try:
+        pre = _preprocess_image_bytes(raw)
+        text = ocr_text_google_vision(pre)
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"OCR failed: {str(e)}",
+                "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS",
+            },
+        )
+
+    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     store_hint = detect_store_hint(raw_lines)
 
     dropped_lines: list[dict[str, Any]] = []
 
-    # early junk-line gate (tracked)
-    filtered: list[str] = []
+    # Reuse the same logic as /parse-receipt, but keep extra debug structures
+    lines: list[str] = raw_lines[:]
+    keep: list[str] = []
+    skip_next_value = False
+
     for ln in lines:
-        if _is_junk_line_gate(ln):
-            if debug:
-                dropped_lines.append({"line": ln, "stage": "junk_gate"})
-            continue
-        filtered.append(ln)
-    lines = filtered
-
-    # Keep BOTH raw and cleaned lines, and require price/qty hints on the raw line
-    kept: list[tuple[str, str]] = []  # (raw_line, cleaned_line)
-    for ln in lines:
-        raw_ln = ln
-
-        if not _raw_line_has_price_or_qty_hint(raw_ln):
-            if debug:
-                dropped_lines.append({"line": raw_ln, "stage": "price_hint"})
+        s = (ln or "").strip()
+        if not s:
             continue
 
-        if not _looks_like_item(raw_ln):
-            if debug:
-                dropped_lines.append({"line": raw_ln, "stage": "looks_like_item_raw"})
+        if skip_next_value:
+            if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s):
+                dropped_lines.append({"line": s, "stage": "noise_value"})
+                skip_next_value = False
+                continue
+            skip_next_value = False
+
+        if _is_header_or_address(s):
+            dropped_lines.append({"line": s, "stage": "junk_gate"})
             continue
 
-        cleaned = _clean_line(raw_ln)
+        if NOISE_RE.search(s):
+            dropped_lines.append({"line": s, "stage": "junk_gate"})
+            skip_next_value = True
+            continue
+
+        keep.append(s)
+
+    lines = keep
+
+    kept: list[tuple[str, str]] = []
+    i = 0
+    while i < len(lines):
+        cur = lines[i].strip()
+
+        if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
+            i += 1
+            continue
+
+        if not _looks_like_item(cur):
+            dropped_lines.append({"line": cur, "stage": "looks_like_item_raw"})
+            i += 1
+            continue
+
+        has_hint = _raw_line_has_price_or_qty_hint(cur)
+        consume = 0
+        n1 = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        n2 = lines[i + 2].strip() if i + 2 < len(lines) else ""
+
+        if not has_hint:
+            if n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or _raw_line_has_price_or_qty_hint(n1)):
+                has_hint = True
+                consume = 1
+            elif n1 and _is_weight_or_unit_price_line(n1) and n2 and _is_price_like_line(n2):
+                has_hint = True
+                consume = 2
+            elif n2 and (_is_price_like_line(n2) or _is_weight_or_unit_price_line(n2)):
+                has_hint = True
+                consume = 2
+
+        if not has_hint:
+            dropped_lines.append({"line": cur, "stage": "price_hint"})
+            i += 1
+            continue
+
+        cleaned = _clean_line(cur)
         if not cleaned:
-            if debug:
-                dropped_lines.append({"line": raw_ln, "stage": "clean_line_empty"})
+            dropped_lines.append({"line": cur, "stage": "clean_line_empty"})
+            i += 1 + consume
             continue
 
         if not _looks_like_item(cleaned):
-            if debug:
-                dropped_lines.append({"line": raw_ln, "stage": "looks_like_item_clean", "cleaned": cleaned})
+            dropped_lines.append({"line": cur, "stage": "looks_like_item_clean", "cleaned": cleaned})
+            i += 1 + consume
             continue
 
-        kept.append((raw_ln, cleaned))
+        kept.append((cur, cleaned))
+        i += 1 + consume
 
     parsed: list[dict[str, Any]] = []
     enrich_debug: list[dict[str, Any]] = []
@@ -1071,20 +1229,19 @@ async def parse_receipt(
 
         final_name = (enriched or "").strip()
 
-        if debug:
-            enrich_debug.append(
-                {
-                    "raw_line": raw_ln,
-                    "cleaned_line": cleaned_ln,
-                    "qty": qty,
-                    "name_cleaned": name_cleaned,
-                    "name_expanded": expanded,
-                    "name_enriched": enriched,
-                    "enrich_source": source,
-                    "enrich_score": score,
-                    "enrich_query_used": query_used,
-                }
-            )
+        enrich_debug.append(
+            {
+                "raw_line": raw_ln,
+                "cleaned_line": cleaned_ln,
+                "qty": qty,
+                "name_cleaned": name_cleaned,
+                "name_expanded": expanded,
+                "name_enriched": enriched,
+                "enrich_source": source,
+                "enrich_score": score,
+                "enrich_query_used": query_used,
+            }
+        )
 
         if not final_name:
             continue
@@ -1107,31 +1264,24 @@ async def parse_receipt(
     for it in parsed:
         it["image_url"] = _image_url_for_item(base_url, it["name"])
 
-    # Keep your debug wrapper exactly as before (bypass response_model by returning JSONResponse)
-    if debug:
-        return JSONResponse(
-            content={
-                "items": parsed,
-                "raw_line_count": len(raw_lines),
-                "kept_line_count": len(kept),
-                "kept_lines": [c for (_r, c) in kept][:200],
-                "base_url": base_url,
-                "store_hint": store_hint,
-                "enrichment_debug": enrich_debug[:200],
-                "enrich_enabled": ENABLE_NAME_ENRICH,
-                "enrich_min_conf": ENRICH_MIN_CONF,
-                "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
-                "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
-                "off_page_size": OFF_PAGE_SIZE,
-                "off_search_urls": OFF_SEARCH_URLS,
-                "learned_map_entries": len(_LEARNED_MAP),
-                "pending_entries": len(_PENDING),
-                "debug": {"dropped_lines": dropped_lines[:200]},
-            }
-        )
-
-    # IMPORTANT: return TOP-LEVEL ARRAY for the scanner
-    return parsed
+    return {
+        "items": parsed,
+        "raw_line_count": len(raw_lines),
+        "kept_line_count": len(kept),
+        "kept_lines": [c for (_r, c) in kept][:200],
+        "base_url": base_url,
+        "store_hint": store_hint,
+        "enrichment_debug": enrich_debug[:200],
+        "enrich_enabled": ENABLE_NAME_ENRICH,
+        "enrich_min_conf": ENRICH_MIN_CONF,
+        "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
+        "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
+        "off_page_size": OFF_PAGE_SIZE,
+        "off_search_urls": OFF_SEARCH_URLS,
+        "learned_map_entries": len(_LEARNED_MAP),
+        "pending_entries": len(_PENDING),
+        "debug": {"dropped_lines": dropped_lines[:300]},
+    }
 
 
 # ============================================================
