@@ -8,10 +8,10 @@ CHANGES MADE (scanner fix only; everything else kept the same):
    - Prevents 422 errors if the app posts with "image" instead of "file".
 3) Swagger schema is now correct via response_model=List[ParsedItem].
 4) debug mode still returns the wrapped debug object (so you keep all your debug tooling).
-   - If your app ever calls debug=true, it will get the debug wrapper.
-   - Normal scanner path (debug=false) gets the array it expects.
-
-Everything else is unchanged.
+   - IMPORTANT: debug responses are returned as JSONResponse to bypass response_model validation.
+5) Prevent common iPhone photo 500s:
+   - If the upload is HEIC/HEIF and Pillow can’t decode it on Render, return 415 with a clear message
+     (instead of crashing with 500).
 """
 
 from __future__ import annotations
@@ -33,6 +33,16 @@ from fastapi.responses import JSONResponse, Response
 from PIL import Image, ImageOps, ImageFilter
 
 from google.cloud import vision
+
+# Optional HEIC support (only works if pillow-heif is installed in your Render env)
+try:
+    import pillow_heif  # type: ignore
+
+    pillow_heif.register_heif_opener()
+    _HEIF_ENABLED = True
+except Exception:
+    _HEIF_ENABLED = False
+
 
 # ============================================================
 # App + Lifespan clients (re-use connections; much faster)
@@ -321,7 +331,12 @@ def _clean_line(line: str) -> str:
 
     s = UNIT_PRICE_RE.sub("", s).strip()
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2}))+\s*$", "", s).strip()
-    s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(
+        r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    ).strip()
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -835,7 +850,12 @@ async def _openfoodfacts_best_match(name: str, store_hint: str = "") -> Optional
     return None
 
 
-async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str, store_hint: str = "") -> Tuple[str, str, float, str]:
+async def enrich_full_name(
+    raw_line: str,
+    cleaned_name: str,
+    expanded_name: str,
+    store_hint: str = "",
+) -> Tuple[str, str, float, str]:
     if not ENABLE_NAME_ENRICH:
         return expanded_name, "none", 0.0, ""
 
@@ -876,6 +896,18 @@ async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str,
 # OCR
 # ============================================================
 
+def _is_heic_bytes(data: bytes) -> bool:
+    """
+    HEIC/HEIF signature: ISO BMFF 'ftyp' with heic/heif/mif1/heix/hevc brands.
+    """
+    if not data or len(data) < 12:
+        return False
+    if data[4:8] != b"ftyp":
+        return False
+    brand = data[8:12]
+    return brand in {b"heic", b"heif", b"heix", b"hevc", b"mif1"}
+
+
 def _preprocess_image_bytes(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)
@@ -915,7 +947,7 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True}
+    return {"ok": True, "heif_enabled": _HEIF_ENABLED}
 
 
 # ============================================================
@@ -936,8 +968,8 @@ class ParsedItem(BaseModel):
 @app.post("/parse-receipt/", response_model=List[ParsedItem])
 async def parse_receipt(
     request: Request,
-    file: UploadFile | None = File(None),
-    image: UploadFile | None = File(None),
+    file: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
     debug: bool = Query(False, description="include debug fields"),
 ):
     """
@@ -953,6 +985,16 @@ async def parse_receipt(
     raw = await upload.read()
     if not raw:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
+
+    # If the iPhone sends HEIC and Render can't decode it, return a clear 415 instead of a 500.
+    if _is_heic_bytes(raw) and not _HEIF_ENABLED:
+        return JSONResponse(
+            status_code=415,
+            content={
+                "error": "Unsupported image format (HEIC/HEIF).",
+                "hint": "Please send JPG/PNG, or install 'pillow-heif' in the Render backend to support HEIC.",
+            },
+        )
 
     try:
         pre = _preprocess_image_bytes(raw)
@@ -1065,26 +1107,28 @@ async def parse_receipt(
     for it in parsed:
         it["image_url"] = _image_url_for_item(base_url, it["name"])
 
-    # Keep your debug wrapper exactly as before
+    # Keep your debug wrapper exactly as before (bypass response_model by returning JSONResponse)
     if debug:
-        return {
-            "items": parsed,
-            "raw_line_count": len(raw_lines),
-            "kept_line_count": len(kept),
-            "kept_lines": [c for (_r, c) in kept][:200],
-            "base_url": base_url,
-            "store_hint": store_hint,
-            "enrichment_debug": enrich_debug[:200],
-            "enrich_enabled": ENABLE_NAME_ENRICH,
-            "enrich_min_conf": ENRICH_MIN_CONF,
-            "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
-            "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
-            "off_page_size": OFF_PAGE_SIZE,
-            "off_search_urls": OFF_SEARCH_URLS,
-            "learned_map_entries": len(_LEARNED_MAP),
-            "pending_entries": len(_PENDING),
-            "debug": {"dropped_lines": dropped_lines[:200]},
-        }
+        return JSONResponse(
+            content={
+                "items": parsed,
+                "raw_line_count": len(raw_lines),
+                "kept_line_count": len(kept),
+                "kept_lines": [c for (_r, c) in kept][:200],
+                "base_url": base_url,
+                "store_hint": store_hint,
+                "enrichment_debug": enrich_debug[:200],
+                "enrich_enabled": ENABLE_NAME_ENRICH,
+                "enrich_min_conf": ENRICH_MIN_CONF,
+                "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
+                "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
+                "off_page_size": OFF_PAGE_SIZE,
+                "off_search_urls": OFF_SEARCH_URLS,
+                "learned_map_entries": len(_LEARNED_MAP),
+                "pending_entries": len(_PENDING),
+                "debug": {"dropped_lines": dropped_lines[:200]},
+            }
+        )
 
     # IMPORTANT: return TOP-LEVEL ARRAY for the scanner
     return parsed
