@@ -1,133 +1,144 @@
 from __future__ import annotations
 
-import os
-import re
-import io
-import json
-import time
+import asyncio
 import base64
 import difflib
+import io
+import json
+import os
+import re
+import time
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any, Optional, Tuple, List, Dict
 
-import anyio
 import httpx
 from fastapi import FastAPI, File, UploadFile, Query, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
-from PIL import Image, ImageOps, ImageFilter
-
 from google.cloud import vision
+from PIL import Image, ImageOps, ImageFilter
+from pydantic import BaseModel
 
 # ============================================================
-# Performance-first configuration
+# FastAPI app
 # ============================================================
 
-# Overall per-request budget (server-side). Keep below iOS client timeout.
-# If you set iOS timeout to e.g. 15s, keep this ~10-12s.
-REQUEST_BUDGET_SECONDS = float(os.getenv("REQUEST_BUDGET_SECONDS", "10.0"))
-
-# OCR settings
-OCR_MODE = (os.getenv("OCR_MODE", "document").strip().lower())  # "document" or "text"
-MAX_IMAGE_DIM = int(os.getenv("MAX_IMAGE_DIM", "1700"))  # downscale big photos
-OCR_THREADPOOL = True  # keep True: prevents blocking event loop
-
-# Enrichment settings (OpenFoodFacts)
-ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
-ENRICH_MAX_ITEMS = int(os.getenv("ENRICH_MAX_ITEMS", "10"))  # only enrich top N lines
-ENRICH_TOTAL_BUDGET_SECONDS = float(os.getenv("ENRICH_TOTAL_BUDGET_SECONDS", "2.2"))
-ENRICH_PER_QUERY_TIMEOUT = float(os.getenv("ENRICH_PER_QUERY_TIMEOUT", "1.2"))
-ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.60"))
-ENRICH_FORCE_BEST_EFFORT = (os.getenv("ENRICH_FORCE_BEST_EFFORT", "1").strip() == "1")
-ENRICH_FORCE_SCORE_FLOOR = float(os.getenv("ENRICH_FORCE_SCORE_FLOOR", "0.52"))
-ENRICH_CACHE_TTL_SECONDS = int(os.getenv("ENRICH_CACHE_TTL_SECONDS", "86400"))
-
-# OpenFoodFacts endpoints
-OFF_SEARCH_URL_US = (os.getenv("OFF_SEARCH_URL_US") or "https://us.openfoodfacts.org/cgi/search.pl").strip()
-OFF_SEARCH_URL_WORLD = (os.getenv("OFF_SEARCH_URL_WORLD") or "https://world.openfoodfacts.org/cgi/search.pl").strip()
-OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "18"))
-OFF_FIELDS = (os.getenv("OFF_FIELDS") or "product_name,product_name_en,brands,quantity").strip()
-
-# Learned map & pending map
-NAME_MAP_JSON = (os.getenv("NAME_MAP_JSON") or "").strip()
-NAME_MAP_PATH = (os.getenv("NAME_MAP_PATH") or "/tmp/name_map.json").strip()
-PENDING_PATH = (os.getenv("PENDING_PATH") or "/tmp/pending_map.json").strip()
-PENDING_ENABLED = (os.getenv("PENDING_ENABLED", "1").strip() == "1")
-ADMIN_KEY = (os.getenv("ADMIN_KEY") or "").strip()
-
-# Packshot service
-PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
-PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
-
-VISION_TMP_PATH = "/tmp/gcloud_key.json"
+app = FastAPI()
 
 # ============================================================
-# Globals (reused clients)
+# Clients / concurrency controls
 # ============================================================
 
 OFF_CLIENT: Optional[httpx.AsyncClient] = None
 IMG_CLIENT: Optional[httpx.AsyncClient] = None
-VISION_CLIENT: Optional[vision.ImageAnnotatorClient] = None
 
-_LEARNED_MAP: Dict[str, str] = {}
-_PENDING: Dict[str, Dict[str, Any]] = {}
+OFF_SEM: Optional[asyncio.Semaphore] = None
+ENRICH_SEM: Optional[asyncio.Semaphore] = None
 
-# Cache: key -> (expires_at, name, source, score)
-_ENRICH_CACHE: Dict[str, Tuple[float, str, str, float]] = {}
+# ============================================================
+# Config
+# ============================================================
 
-# Image caches
-_IMAGE_CACHE: Dict[str, bytes] = {}
-_IMAGE_CONTENT_TYPE_CACHE: Dict[str, str] = {}
-_MAX_CACHE_ITEMS = 2000
+# Overall request time budget (prevents platform timeouts).
+# Keep this BELOW your platform gateway timeout.
+REQUEST_DEADLINE_SECONDS = float(os.getenv("REQUEST_DEADLINE_SECONDS", "12.0"))
 
-app = FastAPI()
+# OpenFoodFacts per-call timeout.
+ENRICH_TIMEOUT_SECONDS = float(os.getenv("ENRICH_TIMEOUT_SECONDS", "1.8"))
 
+# Enrichment behavior
+ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
+ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.58"))
+
+# If true, allow a best-effort OFF result below min conf (still bounded by budgets)
+ENRICH_FORCE_BEST_EFFORT = (os.getenv("ENRICH_FORCE_BEST_EFFORT", "1").strip() == "1")
+ENRICH_FORCE_SCORE_FLOOR = float(os.getenv("ENRICH_FORCE_SCORE_FLOOR", "0.50"))
+
+# Hard cap: how many items per request are allowed to hit OpenFoodFacts
+MAX_OFF_LOOKUPS_PER_REQUEST = int(os.getenv("MAX_OFF_LOOKUPS_PER_REQUEST", "6"))
+
+# Concurrency
+OFF_CONCURRENCY = int(os.getenv("OFF_CONCURRENCY", "4"))
+ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6"))
+
+# OpenFoodFacts endpoints & query sizing
+OFF_SEARCH_URL_US = (os.getenv("OFF_SEARCH_URL_US") or "https://us.openfoodfacts.org/cgi/search.pl").strip()
+OFF_SEARCH_URL_WORLD = (os.getenv("OFF_SEARCH_URL_WORLD") or "https://world.openfoodfacts.org/cgi/search.pl").strip()
+OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "12"))
+OFF_FIELDS = (os.getenv("OFF_FIELDS") or "product_name,product_name_en,brands,quantity").strip()
+
+# Learned map / pending
+NAME_MAP_JSON = (os.getenv("NAME_MAP_JSON") or "").strip()
+NAME_MAP_PATH = (os.getenv("NAME_MAP_PATH") or "/tmp/name_map.json").strip()
+
+PENDING_PATH = (os.getenv("PENDING_PATH") or "/tmp/pending_map.json").strip()
+PENDING_ENABLED = (os.getenv("PENDING_ENABLED", "1").strip() == "1")
+
+ADMIN_KEY = (os.getenv("ADMIN_KEY") or "").strip()
+
+# Google Vision creds
+VISION_TMP_PATH = "/tmp/gcloud_key.json"
+
+# Image packshot proxy (optional)
+PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
+PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
+
+# ============================================================
+# Startup / shutdown
+# ============================================================
 
 @app.on_event("startup")
-async def startup():
-    global OFF_CLIENT, IMG_CLIENT, VISION_CLIENT
-    _init_google_credentials_file()
-
-    # Reuse clients (keep-alive) – critical on Render
+async def _startup():
+    global OFF_CLIENT, IMG_CLIENT, OFF_SEM, ENRICH_SEM
     OFF_CLIENT = httpx.AsyncClient(
-        timeout=httpx.Timeout(ENRICH_PER_QUERY_TIMEOUT, connect=1.0),
+        timeout=httpx.Timeout(ENRICH_TIMEOUT_SECONDS),
         follow_redirects=True,
-        limits=httpx.Limits(max_connections=30, max_keepalive_connections=20),
         headers={"User-Agent": "ShelfLife/1.0"},
     )
     IMG_CLIENT = httpx.AsyncClient(
-        timeout=httpx.Timeout(12.0, connect=3.0),
+        timeout=httpx.Timeout(10.0),
         follow_redirects=True,
-        limits=httpx.Limits(max_connections=30, max_keepalive_connections=20),
         headers={"User-Agent": "Mozilla/5.0"},
     )
+    OFF_SEM = asyncio.Semaphore(max(1, OFF_CONCURRENCY))
+    ENRICH_SEM = asyncio.Semaphore(max(1, ENRICH_CONCURRENCY))
 
-    # Create Vision client ONCE
-    try:
-        VISION_CLIENT = vision.ImageAnnotatorClient()
-    except Exception as e:
-        print("Google Vision client init failed:", e)
-        VISION_CLIENT = None
-
+    _init_google_credentials_file()
     _load_learned_map()
     _load_pending_map()
     print("Startup complete.")
 
 
 @app.on_event("shutdown")
-async def shutdown():
-    global OFF_CLIENT, IMG_CLIENT, VISION_CLIENT
+async def _shutdown():
+    global OFF_CLIENT, IMG_CLIENT
     if OFF_CLIENT:
         await OFF_CLIENT.aclose()
     if IMG_CLIENT:
         await IMG_CLIENT.aclose()
     OFF_CLIENT = None
     IMG_CLIENT = None
-    VISION_CLIENT = None
 
 
 # ============================================================
-# Google Vision credentials setup
+# Helpers: safe time budgeting
+# ============================================================
+
+@dataclass
+class ReqBudget:
+    started: float
+    deadline: float
+    off_used: int = 0
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0
+
+
+# ============================================================
+# Google Vision setup
 # ============================================================
 
 def _init_google_credentials_file() -> None:
@@ -149,6 +160,54 @@ def _init_google_credentials_file() -> None:
         print("Google creds: failed to parse/write credentials JSON:", e)
 
 
+def _vision_client() -> vision.ImageAnnotatorClient:
+    return vision.ImageAnnotatorClient()
+
+
+def _preprocess_image_bytes(data: bytes) -> bytes:
+    """
+    Speed-focused preprocessing:
+    - Normalize orientation
+    - Grayscale + contrast
+    - Downscale large images (big images slow OCR + increase latency)
+    """
+    img = Image.open(io.BytesIO(data))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+
+    # Downscale to a reasonable max dimension
+    max_dim = int(os.getenv("OCR_MAX_DIM", "1600"))
+    w, h = img.size
+    scale = max(w, h) / max_dim if max(w, h) > max_dim else 1.0
+    if scale > 1.0:
+        img = img.resize((int(w / scale), int(h / scale)))
+
+    img = ImageOps.grayscale(img)
+    img = ImageOps.autocontrast(img)
+    img = img.filter(ImageFilter.SHARPEN)
+
+    out = io.BytesIO()
+    # PNG is fine; keep optimize on
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def ocr_text_google_vision(image_bytes: bytes) -> str:
+    client = _vision_client()
+    image = vision.Image(content=image_bytes)
+    resp = client.document_text_detection(image=image)
+    if resp.error and resp.error.message:
+        raise RuntimeError(resp.error.message)
+
+    if resp.full_text_annotation and resp.full_text_annotation.text:
+        return resp.full_text_annotation.text
+
+    if resp.text_annotations:
+        return resp.text_annotations[0].description or ""
+
+    return ""
+
+
 # ============================================================
 # Parsing helpers (noise filters, cleaning, quantity)
 # ============================================================
@@ -156,7 +215,8 @@ def _init_google_credentials_file() -> None:
 NOISE_PATTERNS = [
     # totals/tenders
     r"\btotal\b", r"\bsub\s*total\b", r"\bsubtotal\b", r"\btax\b", r"\bbalance\b",
-    r"\bchange\b", r"\bamount\b", r"\bamnt\b", r"\btender\b", r"\bcash\b",
+    r"\bamount\s+due\b", r"\bdue\b",
+    r"\bchange\b", r"\btender\b", r"\bcash\b",
     r"\bpayment\b", r"\bdebit\b", r"\bcredit\b",
     r"\bvisa\b", r"\bmastercard\b", r"\bamex\b", r"\bdiscover\b",
     r"\bauth\b", r"\bapproval\b", r"\bapproved\b",
@@ -180,7 +240,7 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # specific junk token seen in scans
+    # specific junk token
     r"\bvov\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
@@ -191,25 +251,34 @@ DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
 PHONEISH_RE = re.compile(r"\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b")
 
 ADDR_SUFFIX_RE = re.compile(
-    r"\b("
-    r"st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|"
-    r"pkwy|parkway|hwy|highway|trl|trail|pl|place|cir|circle|way"
-    r")\b",
+    r"\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|"
+    r"pkwy|parkway|hwy|highway|trl|trail|pl|place|cir|circle|way)\b",
     re.IGNORECASE,
 )
 DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNORECASE)
-STATE_RE = re.compile(r"\b(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b")
 
+# Allow dot or comma decimals for OCR
 UNIT_PRICE_RE = re.compile(r"\b\d+\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
 
-MONEY_TOKEN_RE = re.compile(r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|\b\d{1,6}\s+\d{2}\b")
-ONLY_MONEYISH_RE = re.compile(r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})?\s*$|^\s*\d+\s+\d{2}\s*$")
-PRICE_FLAG_RE = re.compile(r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{1,2}\s*$|^\s*\d+\s+\d{2}\s*[A-Za-z]{1,2}\s*$")
+MONEY_TOKEN_RE = re.compile(
+    r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|\b\d{1,6}\s+\d{2}\b"
+)
+ONLY_MONEYISH_RE = re.compile(
+    r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})?\s*$|^\s*\d+\s+\d{2}\s*$"
+)
+PRICE_FLAG_RE = re.compile(
+    r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{1,2}\s*$|^\s*\d+\s+\d{2}\s*[A-Za-z]{1,2}\s*$"
+)
 
 WEIGHT_ONLY_RE = re.compile(r"^\s*\$?\d+(?:[.,]\s*\d+)?\s*(lb|lbs|oz|g|kg|ct)\s*$", re.IGNORECASE)
 PER_UNIT_PRICE_RE = re.compile(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", re.IGNORECASE)
 
-STOP_ITEM_WORDS = {"lb", "lbs", "oz", "g", "kg", "ct", "ea", "each", "w", "wt", "weight", "at", "x", "vov"}
+STOP_ITEM_WORDS = {
+    "lb", "lbs", "oz", "g", "kg", "ct", "ea", "each",
+    "w", "wt", "weight",
+    "at", "x",
+    "vov",
+}
 
 HOUSEHOLD_WORDS = {
     "paper", "towel", "towels", "toilet", "tissue", "napkin", "napkins",
@@ -220,7 +289,6 @@ HOUSEHOLD_WORDS = {
     "battery", "batteries", "lightbulb", "lighter", "matches",
     "pet", "litter",
 }
-
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -240,9 +308,11 @@ def title_case(s: str) -> str:
             return raw
         if raw.isalpha() and raw.upper() == raw and 2 <= len(raw) <= 5:
             return raw
+
         lw = raw.lower()
         if not is_first and lw in small:
             return lw
+
         if "-" in raw:
             parts = [p for p in raw.split("-") if p != ""]
             outp: list[str] = []
@@ -253,12 +323,14 @@ def title_case(s: str) -> str:
                 else:
                     outp.append(pl[:1].upper() + pl[1:])
             return "-".join(outp)
+
         if "'" in raw:
             parts = raw.split("'")
             base = parts[0].lower()
             base = base[:1].upper() + base[1:] if base else base
             rest = "'".join(parts[1:])
             return base + ("'" + rest.lower() if rest else "")
+
         return lw[:1].upper() + lw[1:]
 
     out: list[str] = []
@@ -268,6 +340,10 @@ def title_case(s: str) -> str:
 
 
 def _is_header_or_address(line: str) -> bool:
+    """
+    Conservative. We REMOVED the old STATE_RE heuristic because it drops real items like:
+    "FL ORANGES", "CA STRAWBERRIES", etc.
+    """
     s = (line or "").strip()
     if not s:
         return True
@@ -279,11 +355,6 @@ def _is_header_or_address(line: str) -> bool:
         return True
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
-    if STATE_RE.search(s):
-        words = re.findall(r"[A-Za-z]+", s)
-        has_money = bool(MONEY_TOKEN_RE.search(s))
-        if 2 <= len(words) <= 12 and not has_money:
-            return True
     return False
 
 
@@ -293,37 +364,77 @@ def _has_valid_item_words(line: str) -> bool:
     return len(words) > 0
 
 
+def _is_price_like_line(s: str) -> bool:
+    if not s:
+        return False
+    ss = (s or "").strip()
+    if ONLY_MONEYISH_RE.match(ss):
+        return True
+    if PRICE_FLAG_RE.match(ss):
+        return True
+    if re.match(r"^\s*-\s*\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{0,2}\s*$", ss):
+        return True
+    if re.match(r"^\s*\d+\s+\d{2}\s*[A-Za-z]{0,2}\s*$", ss):
+        return True
+    return False
+
+
+def _is_weight_or_unit_price_line(s: str) -> bool:
+    if not s:
+        return False
+    ss = (s or "").strip()
+    if UNIT_PRICE_RE.search(ss):
+        return True
+    if PER_UNIT_PRICE_RE.search(ss):
+        return True
+    if re.search(r"\blb\b", ss, flags=re.IGNORECASE) and ("@" in ss or "/" in ss):
+        return True
+    return False
+
+
 def _looks_like_item(line: str) -> bool:
     if not line:
         return False
     s = (line or "").strip()
+
     if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or WEIGHT_ONLY_RE.match(s):
         return False
     if PER_UNIT_PRICE_RE.search(s) and not _has_valid_item_words(s):
         return False
     if NOISE_RE.search(s) or _is_header_or_address(s):
         return False
+
     letters = len(re.findall(r"[A-Za-z]", s))
     digits = len(re.findall(r"\d", s))
+
     if letters == 0:
         return False
-    if digits >= 4 and letters <= 2:
+
+    # avoid lines that are basically numeric codes
+    if digits >= 5 and letters <= 2:
         return False
+
     if not _has_valid_item_words(s):
         return False
-    if len(s) > 72:
+
+    # receipts can have long official names; 64 was too strict
+    if len(s) > 90:
         return False
+
     return True
 
 
 def _clean_line(line: str) -> str:
     s = (line or "").strip()
-    # strip trailing prices (many OCR variants)
+
+    # Strip OCR-style trailing prices:
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
+
     s = UNIT_PRICE_RE.sub("", s).strip()
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2}))+\s*$", "", s).strip()
     s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
+
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -331,17 +442,24 @@ def _clean_line(line: str) -> str:
 
 def _parse_quantity(line: str) -> Tuple[int, str]:
     s = (line or "").strip()
+
+    # trailing: "Item x2"
     m = re.search(r"(.*?)\b[xX]\s*(\d+)\s*$", s)
     if m:
         return max(int(m.group(2)), 1), m.group(1).strip()
+
+    # leading: "2x Item"
     m = re.match(r"^\s*(\d+)\s*[xX]\s+(.*)$", s)
     if m:
         return max(int(m.group(1)), 1), m.group(2).strip()
+
+    # leading bare qty: "2 Item"
     m = re.match(r"^\s*(\d+)\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
         if 1 <= qty <= 50:
             return qty, m.group(2).strip()
+
     return 1, s
 
 
@@ -382,10 +500,6 @@ def _image_url_for_item(base_url: str, name: str) -> str:
     return f"{base_url}/image?name={qname}"
 
 
-# ============================================================
-# Price-aware keep gate (lookahead hints)
-# ============================================================
-
 def _raw_line_has_price_or_qty_hint(s: str) -> bool:
     if not s:
         return False
@@ -398,36 +512,8 @@ def _raw_line_has_price_or_qty_hint(s: str) -> bool:
     return False
 
 
-def _is_price_like_line(s: str) -> bool:
-    if not s:
-        return False
-    ss = (s or "").strip()
-    if ONLY_MONEYISH_RE.match(ss):
-        return True
-    if PRICE_FLAG_RE.match(ss):
-        return True
-    if re.match(r"^\s*-\s*\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{0,2}\s*$", ss):
-        return True
-    if re.match(r"^\s*\d+\s+\d{2}\s*[A-Za-z]{0,2}\s*$", ss):
-        return True
-    return False
-
-
-def _is_weight_or_unit_price_line(s: str) -> bool:
-    if not s:
-        return False
-    ss = (s or "").strip()
-    if UNIT_PRICE_RE.search(ss):
-        return True
-    if PER_UNIT_PRICE_RE.search(ss):
-        return True
-    if re.search(r"\blb\b", ss, flags=re.IGNORECASE) and ("@" in ss or "/" in ss):
-        return True
-    return False
-
-
 # ============================================================
-# Store hints
+# Store hint (used only as a hint; do not drop store-brand items)
 # ============================================================
 
 STORE_HINTS: list[tuple[str, re.Pattern]] = [
@@ -441,9 +527,19 @@ STORE_HINTS: list[tuple[str, re.Pattern]] = [
     ("trader joe's", re.compile(r"\btrader\s+joe'?s\b", re.IGNORECASE)),
 ]
 
+STORE_HEADER_PATTERNS: dict[str, re.Pattern] = {
+    "publix": re.compile(r"^\s*publix(?:\s+super\s*markets?)?\s*$", re.IGNORECASE),
+    "walmart": re.compile(r"^\s*wal[-\s]*mart(?:\s+stores?)?\s*$", re.IGNORECASE),
+    "target": re.compile(r"^\s*target\s*$", re.IGNORECASE),
+    "costco": re.compile(r"^\s*costco(?:\s+wholesale)?\s*$", re.IGNORECASE),
+    "kroger": re.compile(r"^\s*kroger\s*$", re.IGNORECASE),
+    "aldi": re.compile(r"^\s*aldi\s*$", re.IGNORECASE),
+    "whole foods": re.compile(r"^\s*whole\s+foods(?:\s+market)?\s*$", re.IGNORECASE),
+    "trader joe's": re.compile(r"^\s*trader\s+joe'?s\s*$", re.IGNORECASE),
+}
 
 def detect_store_hint(raw_lines: list[str]) -> str:
-    blob = " \n ".join(raw_lines[:80]).lower()
+    blob = " \n ".join(raw_lines[:120]).lower()
     for name, pat in STORE_HINTS:
         if pat.search(blob):
             return name
@@ -455,32 +551,70 @@ def detect_store_hint(raw_lines: list[str]) -> str:
 # ============================================================
 
 ABBREV_TOKEN_MAP: dict[str, str] = {
-    "pblx": "publix", "publx": "publix", "pub": "publix", "pbl": "publix",
-    "crm": "cream", "chs": "cheese", "whp": "whipping", "whp.": "whipping",
-    "hvy": "heavy", "hvy.": "heavy", "cr": "cream", "chs.": "cheese",
-    "bttr": "butter", "marg": "margarine", "yog": "yogurt",
-    "veg": "vegetable", "org": "organic", "wb": "whole",
-    "grd": "ground", "bf": "beef", "chk": "chicken", "ckn": "chicken",
-    "chkn": "chicken", "brst": "breast", "bnls": "boneless",
-    "sknls": "skinless", "flr": "flour", "pdr": "powdered",
-    "sug": "sugar", "brn": "brown", "van": "vanilla",
-    "ext": "extract", "vngr": "vinegar",
-    "alc": "alcohol", "iso": "isopropyl", "isoprop": "isopropyl", "isopropyl": "isopropyl",
+    # store-brand tokens
+    "pblx": "publix",
+    "publx": "publix",
+    "pub": "publix",
+    "pbl": "publix",
+
+    # dairy
+    "crm": "cream",
+    "chs": "cheese",
+    "whp": "whipping",
+    "whp.": "whipping",
+    "hvy": "heavy",
+    "hvy.": "heavy",
+    "cr": "cream",
+    "chs.": "cheese",
+    "bttr": "butter",
+    "marg": "margarine",
+    "yog": "yogurt",
+
+    # staples
+    "veg": "vegetable",
+    "org": "organic",
+    "wb": "whole",
+    "grd": "ground",
+    "bf": "beef",
+    "chk": "chicken",
+    "ckn": "chicken",
+    "chkn": "chicken",
+    "brst": "breast",
+    "bnls": "boneless",
+    "sknls": "skinless",
+    "flr": "flour",
+    "pdr": "powdered",
+    "sug": "sugar",
+    "brn": "brown",
+    "van": "vanilla",
+    "ext": "extract",
+    "vngr": "vinegar",
+
+    # household-ish
+    "alc": "alcohol",
+    "iso": "isopropyl",
+    "isoprop": "isopropyl",
+    "isopropyl": "isopropyl",
 }
 
 PHRASE_MAP: dict[str, str] = {
     "half and half": "half-and-half",
     "h and h": "half-and-half",
     "hnh": "half-and-half",
+    "hf and hf": "half-and-half",
+
     "heavy whipping cream": "heavy whipping cream",
     "cream cheese": "cream cheese",
     "sour cream": "sour cream",
+
     "ground beef": "ground beef",
     "chicken breast": "chicken breast",
     "boneless chicken breast": "boneless chicken breast",
     "boneless skinless chicken breast": "boneless skinless chicken breast",
+
     "olive oil": "olive oil",
     "vegetable oil": "vegetable oil",
+
     "all purpose flour": "all-purpose flour",
     "powdered sugar": "powdered sugar",
     "brown sugar": "brown sugar",
@@ -488,7 +622,6 @@ PHRASE_MAP: dict[str, str] = {
     "apple cider vinegar": "apple cider vinegar",
     "balsamic vinegar": "balsamic vinegar",
 }
-
 
 def _normalize_for_phrase_match(s: str) -> str:
     s = (s or "").lower().strip()
@@ -523,9 +656,39 @@ def expand_abbreviations(name: str) -> str:
     return re.sub(r"\s+", " ", norm).strip()
 
 
+def _looks_abbreviated(name: str) -> bool:
+    """
+    Decide when OFF enrichment is worth it.
+    If it's already pretty "human", skip OFF to avoid timeouts.
+    """
+    s = (name or "").strip()
+    if not s:
+        return False
+    toks = re.findall(r"[A-Za-z0-9]+", s)
+    if not toks:
+        return False
+    short = sum(1 for t in toks if len(t) <= 3 and t.isalpha())
+    letters = sum(1 for ch in s if ch.isalpha())
+    if letters == 0:
+        return False
+    # lots of short tokens or very compressed string
+    return short >= 2 or (len(s) <= 10)
+
+
 # ============================================================
-# Learned map + pending collector
+# Name enrichment (OFF + Learned Map + Pending collector)
 # ============================================================
+
+_ENRICH_CACHE: dict[str, Tuple[float, str, str, float]] = {}
+_ENRICH_CACHE_TTL = int(os.getenv("ENRICH_CACHE_TTL_SECONDS", "86400"))
+
+_LEARNED_MAP: dict[str, str] = {}
+_PENDING: dict[str, dict[str, Any]] = {}
+
+_ENRICH_SCORE_STOPWORDS = {
+    "the", "and", "or", "of", "a", "an", "with", "for",
+    "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
+}
 
 def _atomic_write_json(path: str, obj: Any) -> None:
     tmp = f"{path}.tmp"
@@ -600,42 +763,19 @@ def _pending_add(store_hint: str, raw_line: str, cleaned: str, expanded: str) ->
         print("Pending map: write failed:", e)
 
 
-def _learned_map_lookup(raw_line: str, expanded_name: str, store_hint: str = "") -> Optional[str]:
-    raw = (raw_line or "").strip()
-    if not raw:
+def _enrich_cache_get(key: str) -> Optional[Tuple[str, str, float]]:
+    rec = _ENRICH_CACHE.get(key)
+    if not rec:
         return None
-
-    base_keys = [
-        raw,
-        dedupe_key(raw),
-        expanded_name,
-        dedupe_key(expanded_name),
-    ]
-
-    keys: list[str] = []
-    for k in base_keys:
-        if not k:
-            continue
-        keys.append(k)
-        if store_hint:
-            keys.append(f"{store_hint}:{k}")
-            keys.append(f"{dedupe_key(store_hint)}:{k}")
-
-    for k in keys:
-        v = _LEARNED_MAP.get(k)
-        if v and str(v).strip():
-            return str(v).strip()
-    return None
+    expires_at, name, source, score = rec
+    if time.time() > expires_at:
+        _ENRICH_CACHE.pop(key, None)
+        return None
+    return name, source, score
 
 
-# ============================================================
-# Enrichment (OpenFoodFacts) - time budgeted and cached
-# ============================================================
-
-_ENRICH_SCORE_STOPWORDS = {
-    "the", "and", "or", "of", "a", "an", "with", "for",
-    "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
-}
+def _enrich_cache_set(key: str, name: str, source: str, score: float) -> None:
+    _ENRICH_CACHE[key] = (time.time() + _ENRICH_CACHE_TTL, name, source, score)
 
 
 def _tokenize_for_score(s: str) -> list[str]:
@@ -682,19 +822,32 @@ def _score_candidate(query: str, candidate: str, store_hint: str = "") -> float:
     return max(0.0, min(1.0, score))
 
 
-def _enrich_cache_get(key: str) -> Optional[Tuple[str, str, float]]:
-    rec = _ENRICH_CACHE.get(key)
-    if not rec:
+def _learned_map_lookup(raw_line: str, expanded_name: str, store_hint: str = "") -> Optional[str]:
+    raw = (raw_line or "").strip()
+    if not raw:
         return None
-    expires_at, name, source, score = rec
-    if time.time() > expires_at:
-        _ENRICH_CACHE.pop(key, None)
-        return None
-    return name, source, score
 
+    base_keys = [
+        raw,
+        dedupe_key(raw),
+        expanded_name,
+        dedupe_key(expanded_name),
+    ]
 
-def _enrich_cache_set(key: str, name: str, source: str, score: float) -> None:
-    _ENRICH_CACHE[key] = (time.time() + ENRICH_CACHE_TTL_SECONDS, name, source, score)
+    keys: list[str] = []
+    for k in base_keys:
+        if not k:
+            continue
+        keys.append(k)
+        if store_hint:
+            keys.append(f"{store_hint}:{k}")
+            keys.append(f"{dedupe_key(store_hint)}:{k}")
+
+    for k in keys:
+        v = _LEARNED_MAP.get(k)
+        if v and str(v).strip():
+            return str(v).strip()
+    return None
 
 
 def _build_off_candidate(p: dict[str, Any]) -> str:
@@ -706,89 +859,45 @@ def _build_off_candidate(p: dict[str, Any]) -> str:
     return " ".join(x for x in [brands, product_name, qty] if x).strip()
 
 
-async def _off_search(search_terms: str) -> list[str]:
-    global OFF_CLIENT
-    if not OFF_CLIENT:
-        return []
-    params = {
-        "search_simple": 1,
-        "action": "process",
-        "json": 1,
-        "page_size": OFF_PAGE_SIZE,
-        "sort_by": "unique_scans_n",
-        "fields": OFF_FIELDS,
-        "search_terms": search_terms,
-    }
-
-    out: list[str] = []
-
-    # Try US first, then WORLD if time permits (but keep it minimal)
-    for url in [OFF_SEARCH_URL_US, OFF_SEARCH_URL_WORLD]:
-        if not url:
-            continue
-        try:
-            r = await OFF_CLIENT.get(url, params=params)
-            r.raise_for_status()
-            data = r.json()
-            products = data.get("products") or []
-            for p in products[:OFF_PAGE_SIZE]:
-                cand = _build_off_candidate(p)
-                if cand:
-                    out.append(cand)
-            if out:
-                return out
-        except Exception:
-            continue
-
-    return out
+async def _off_get(url: str, params: dict[str, Any], timeout_s: float) -> Optional[dict[str, Any]]:
+    global OFF_CLIENT, OFF_SEM
+    if not OFF_CLIENT or not OFF_SEM:
+        return None
+    try:
+        async with OFF_SEM:
+            r = await OFF_CLIENT.get(url, params=params, timeout=httpx.Timeout(timeout_s))
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
 
-async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str, store_hint: str, deadline: float) -> Tuple[str, str, float]:
+async def _openfoodfacts_best_match(name: str, store_hint: str, budget: ReqBudget) -> Optional[Tuple[str, float, str]]:
     """
-    Returns (final_name, source, score).
-    Must respect the absolute deadline; if time is too low, skip.
+    Fast OFF matcher:
+    - fewer variants
+    - US first, world fallback
+    - early exit on strong score
     """
-    if not ENABLE_NAME_ENRICH:
-        return expanded_name, "none", 0.0
-
-    cache_key = dedupe_key(f"{store_hint}:{expanded_name}" if store_hint else expanded_name)
-    if cache_key:
-        cached = _enrich_cache_get(cache_key)
-        if cached:
-            return cached[0], cached[1], cached[2]
-
-    # Learned map first (fast)
-    learned = _learned_map_lookup(raw_line, expanded_name, store_hint=store_hint)
-    if learned:
-        if cache_key:
-            _enrich_cache_set(cache_key, learned, "learned_map", 1.0)
-        return learned, "learned_map", 1.0
-
-    # Deadline guard
-    if time.time() + 0.15 >= deadline:
-        # Not enough time; skip network
-        _pending_add(store_hint, raw_line, cleaned_name, expanded_name)
-        if cache_key:
-            _enrich_cache_set(cache_key, expanded_name, "none", 0.0)
-        return expanded_name, "none", 0.0
-
-    # OFF best match (fast/limited)
-    key = dedupe_key(expanded_name)
+    key = dedupe_key(name)
     if len(key) < 5:
-        _pending_add(store_hint, raw_line, cleaned_name, expanded_name)
-        if cache_key:
-            _enrich_cache_set(cache_key, expanded_name, "none", 0.0)
-        return expanded_name, "none", 0.0
+        return None
+    if budget.expired():
+        return None
 
-    # Build a small set of variants (avoid too many queries)
-    variants: list[str] = [expanded_name]
+    variants: list[str] = [name]
+
+    # If store hint exists and isn't already in the string, add as a variant
     if store_hint and dedupe_key(store_hint) not in key:
-        variants.append(f"{store_hint} {expanded_name}")
+        variants.append(f"{store_hint} {name}")
+
+    # Remove "publix" token variant (if it exists) to improve match chance
     if "publix" in key:
         variants.append(re.sub(r"\bpublix\b", "", key).strip())
 
-    seen = set()
-    query_variants: list[str] = []
+    # Keep variants unique
+    seen: set[str] = set()
+    qvars: list[str] = []
     for v in variants:
         v = re.sub(r"\s+", " ", (v or "").strip())
         if not v:
@@ -797,107 +906,175 @@ async def enrich_full_name(raw_line: str, cleaned_name: str, expanded_name: str,
         if vl in seen:
             continue
         seen.add(vl)
-        query_variants.append(v)
+        qvars.append(v)
+
+    params_base = {
+        "search_simple": 1,
+        "action": "process",
+        "json": 1,
+        "page_size": OFF_PAGE_SIZE,
+        "sort_by": "unique_scans_n",
+        "fields": OFF_FIELDS,
+    }
 
     best_name: Optional[str] = None
     best_score = 0.0
+    best_query = ""
 
-    for q in query_variants:
-        # deadline guard
-        if time.time() + 0.20 >= deadline:
+    urls = [u for u in [OFF_SEARCH_URL_US, OFF_SEARCH_URL_WORLD] if u]
+
+    for q in qvars:
+        if budget.expired():
             break
 
-        try:
-            # enforce per-query timeout using fail_after
-            remaining = max(0.05, min(ENRICH_PER_QUERY_TIMEOUT, deadline - time.time() - 0.05))
-            async with anyio.fail_after(remaining):
-                candidates = await _off_search(q)
-        except TimeoutError:
-            candidates = []
-        except Exception:
-            candidates = []
+        params = dict(params_base)
+        params["search_terms"] = q
 
-        for cand in candidates:
-            s = _score_candidate(q, cand, store_hint=store_hint)
-            if s > best_score:
-                best_score = s
-                best_name = cand
+        for url in urls:
+            if budget.expired():
+                break
 
-        # early exit if already strong
-        if best_score >= 0.80:
-            break
+            # dynamic timeout based on remaining request budget
+            remaining = budget.remaining()
+            if remaining <= 0.35:
+                break
+            timeout_s = min(ENRICH_TIMEOUT_SECONDS, max(0.35, remaining - 0.15))
+
+            data = await _off_get(url, params=params, timeout_s=timeout_s)
+            if not data:
+                continue
+
+            products = data.get("products") or []
+            if not products:
+                continue
+
+            for p in products[:OFF_PAGE_SIZE]:
+                cand = _build_off_candidate(p)
+                if not cand:
+                    continue
+                s = _score_candidate(q, cand, store_hint=store_hint)
+                if s > best_score:
+                    best_score = s
+                    best_name = cand
+                    best_query = q
+                    # Early exit if it's clearly correct
+                    if best_score >= 0.90:
+                        return best_name, best_score, best_query
 
     if best_name:
-        if best_score >= ENRICH_MIN_CONF:
-            if cache_key:
-                _enrich_cache_set(cache_key, best_name, "openfoodfacts", best_score)
-            return best_name, "openfoodfacts", best_score
+        return best_name, best_score, best_query
+    return None
 
-        if ENRICH_FORCE_BEST_EFFORT and best_score >= ENRICH_FORCE_SCORE_FLOOR:
-            if cache_key:
-                _enrich_cache_set(cache_key, best_name, "openfoodfacts_forced", best_score)
-            return best_name, "openfoodfacts_forced", best_score
 
-    _pending_add(store_hint, raw_line, cleaned_name, expanded_name)
+async def enrich_full_name(
+    raw_line: str,
+    cleaned_name: str,
+    expanded_name: str,
+    store_hint: str,
+    budget: ReqBudget,
+) -> Tuple[str, str, float, str]:
+    """
+    Returns: (final_name, source, score, query_used)
+    Bounded by request budget to avoid timeouts.
+    """
+    if not ENABLE_NAME_ENRICH:
+        return expanded_name, "none", 0.0, ""
+
+    if budget.expired():
+        return expanded_name, "budget_expired", 0.0, ""
+
+    cache_key = dedupe_key(f"{store_hint}:{expanded_name}" if store_hint else expanded_name)
+    if cache_key:
+        cached = _enrich_cache_get(cache_key)
+        if cached:
+            return cached[0], cached[1], cached[2], ""
+
+    learned = _learned_map_lookup(raw_line, expanded_name, store_hint=store_hint)
+    if learned:
+        if cache_key:
+            _enrich_cache_set(cache_key, learned, "learned_map", 1.0)
+        return learned, "learned_map", 1.0, ""
+
+    # If it doesn't look abbreviated, skip OFF by default (speed).
+    # You can force OFF behavior by setting ALWAYS_OFF_ENRICH=1.
+    always_off = (os.getenv("ALWAYS_OFF_ENRICH", "0").strip() == "1")
+    if not always_off and not _looks_abbreviated(expanded_name):
+        _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
+        if cache_key:
+            _enrich_cache_set(cache_key, expanded_name, "skipped_off", 0.0)
+        return expanded_name, "skipped_off", 0.0, ""
+
+    # Request-level OFF cap
+    if budget.off_used >= MAX_OFF_LOOKUPS_PER_REQUEST:
+        _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
+        if cache_key:
+            _enrich_cache_set(cache_key, expanded_name, "off_cap", 0.0)
+        return expanded_name, "off_cap", 0.0, ""
+
+    # Enforce remaining time
+    if budget.remaining() <= 0.9:
+        _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
+        if cache_key:
+            _enrich_cache_set(cache_key, expanded_name, "low_budget", 0.0)
+        return expanded_name, "low_budget", 0.0, ""
+
+    budget.off_used += 1
+    off = await _openfoodfacts_best_match(expanded_name, store_hint=store_hint, budget=budget)
+    if off:
+        candidate, score, query_used = off
+
+        if score >= ENRICH_MIN_CONF:
+            if cache_key:
+                _enrich_cache_set(cache_key, candidate, "openfoodfacts", score)
+            return candidate, "openfoodfacts", score, query_used
+
+        if ENRICH_FORCE_BEST_EFFORT and score >= ENRICH_FORCE_SCORE_FLOOR:
+            if cache_key:
+                _enrich_cache_set(cache_key, candidate, "openfoodfacts_forced", score)
+            return candidate, "openfoodfacts_forced", score, query_used
+
+    _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
     if cache_key:
         _enrich_cache_set(cache_key, expanded_name, "none", 0.0)
-    return expanded_name, "none", 0.0
+    return expanded_name, "none", 0.0, ""
 
 
 # ============================================================
-# OCR (fast + non-blocking)
+# Totals marker / items-zone detection
 # ============================================================
 
-def _preprocess_image_bytes(data: bytes) -> bytes:
-    img = Image.open(io.BytesIO(data))
-    img = ImageOps.exif_transpose(img)
-    img = img.convert("RGB")
+TOTAL_MARKER_RE = re.compile(r"\b(sub\s*total|subtotal|total|tax|balance|amount\s+due)\b", re.IGNORECASE)
 
-    # Downscale aggressively for speed (receipts don’t need 4k)
-    w, h = img.size
-    m = max(w, h)
-    if m > MAX_IMAGE_DIM:
-        scale = MAX_IMAGE_DIM / float(m)
-        nw, nh = int(w * scale), int(h * scale)
-        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
+    """
+    Find the totals marker near the bottom of the receipt.
+    Fixes: "TOTAL SAVINGS" early in the receipt cutting off items.
+    """
+    n = len(raw_lines)
+    if n == 0:
+        return None
 
-    img = ImageOps.grayscale(img)
-    img = ImageOps.autocontrast(img)
-    img = img.filter(ImageFilter.SHARPEN)
+    # Only search the last chunk (bottom of receipt)
+    tail_start = max(0, n - max(40, n // 3))
+    candidates = []
+    for idx in range(tail_start, n):
+        ln = raw_lines[idx] or ""
+        if TOTAL_MARKER_RE.search(ln):
+            candidates.append(idx)
 
-    out = io.BytesIO()
-    # PNG is fine; JPEG is often faster to upload, but Vision accepts both.
-    img.save(out, format="PNG", optimize=True)
-    return out.getvalue()
-
-
-def _ocr_text_google_vision_sync(image_bytes: bytes) -> str:
-    if not VISION_CLIENT:
-        raise RuntimeError("Google Vision client not initialized (check credentials).")
-
-    image = vision.Image(content=image_bytes)
-
-    if OCR_MODE == "text":
-        resp = VISION_CLIENT.text_detection(image=image)
-    else:
-        resp = VISION_CLIENT.document_text_detection(image=image)
-
-    if resp.error and resp.error.message:
-        raise RuntimeError(resp.error.message)
-
-    if getattr(resp, "full_text_annotation", None) and resp.full_text_annotation and resp.full_text_annotation.text:
-        return resp.full_text_annotation.text
-
-    if resp.text_annotations:
-        return resp.text_annotations[0].description or ""
-
-    return ""
+    # Use the FIRST marker in the tail (closest to where items end)
+    return candidates[0] if candidates else None
 
 
-async def ocr_text_google_vision(image_bytes: bytes) -> str:
-    if OCR_THREADPOOL:
-        return await anyio.to_thread.run_sync(_ocr_text_google_vision_sync, image_bytes)
-    return _ocr_text_google_vision_sync(image_bytes)
+# ============================================================
+# Models
+# ============================================================
+
+class ParsedItem(BaseModel):
+    name: str
+    quantity: int
+    category: str
+    image_url: str
 
 
 # ============================================================
@@ -909,13 +1086,6 @@ def health() -> dict[str, Any]:
     return {"ok": True}
 
 
-class ParsedItem(BaseModel):
-    name: str
-    quantity: int
-    category: str
-    image_url: str
-
-
 @app.post("/parse-receipt", response_model=List[ParsedItem])
 @app.post("/parse-receipt/", response_model=List[ParsedItem])
 async def parse_receipt(
@@ -925,9 +1095,6 @@ async def parse_receipt(
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(False, description="accepted but does not change response shape (use /parse-receipt-debug for wrapper)"),
 ):
-    start = time.time()
-    deadline = start + REQUEST_BUDGET_SECONDS
-
     upload = file or image
     if upload is None:
         raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
@@ -936,12 +1103,11 @@ async def parse_receipt(
     if not raw:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
 
-    # Preprocess + OCR (time budget)
+    budget = ReqBudget(started=time.monotonic(), deadline=time.monotonic() + REQUEST_DEADLINE_SECONDS)
+
     try:
-        # preprocess can be CPU heavy -> threadpool
-        pre = await anyio.to_thread.run_sync(_preprocess_image_bytes, raw)
-        # OCR
-        text = await ocr_text_google_vision(pre)
+        pre = _preprocess_image_bytes(raw)
+        text = ocr_text_google_vision(pre)
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -951,44 +1117,47 @@ async def parse_receipt(
             },
         )
 
-    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
     store_hint = detect_store_hint(raw_lines)
 
-    # Find earliest subtotal/total marker (safe boundary for item zone)
-    total_marker_idx: int | None = None
-    for idx, ln in enumerate(raw_lines):
-        if re.search(r"\b(sub\s*total|subtotal|total)\b", ln or "", flags=re.IGNORECASE):
-            total_marker_idx = idx
-            break
+    # Find totals marker near bottom for items-zone
+    totals_idx = find_totals_marker_index(raw_lines)
 
     dropped_lines: list[dict[str, Any]] = []
 
-    # Filtering pass
+    # ------------------------------------------------------------
+    # Filtering: conservative drops, keep price lines for pairing
+    # ------------------------------------------------------------
+
     keep: list[tuple[int, str]] = []
     skip_next_value = False
-    store_hint_lc = (store_hint or "").lower().strip()
+
+    store_header_pat = STORE_HEADER_PATTERNS.get(store_hint) if store_hint else None
 
     for i, ln in enumerate(raw_lines):
         s = (ln or "").strip()
         if not s:
             continue
 
-        # drop store name line if detected (prevents PUBLIX becoming item)
-        if store_hint_lc and store_hint_lc in s.lower() and len(s) <= 40:
-            dropped_lines.append({"line": s, "stage": "store_hint"})
+        # Drop exact store header line only (do NOT drop store-brand items)
+        if store_header_pat and store_header_pat.match(s):
+            dropped_lines.append({"line": s, "stage": "store_header"})
             continue
 
+        # If previous was totals-like noise, drop immediate numeric line
         if skip_next_value:
-            if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s):
+            if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or _is_price_like_line(s):
                 dropped_lines.append({"line": s, "stage": "noise_value"})
                 skip_next_value = False
                 continue
             skip_next_value = False
 
+        # Header/address gate
         if _is_header_or_address(s):
             dropped_lines.append({"line": s, "stage": "junk_gate"})
             continue
 
+        # Explicit noise labels
         if NOISE_RE.search(s):
             dropped_lines.append({"line": s, "stage": "junk_gate"})
             skip_next_value = True
@@ -996,14 +1165,18 @@ async def parse_receipt(
 
         keep.append((i, s))
 
+    # ------------------------------------------------------------
     # Candidate extraction with lookahead pairing
-    kept: list[tuple[str, str]] = []  # (raw_item_line, cleaned_item_line)
+    # ------------------------------------------------------------
+
+    kept: list[tuple[str, str, int]] = []  # (raw_item_line, cleaned_item_line, raw_idx)
+
     i = 0
     while i < len(keep):
         raw_idx, cur = keep[i]
         cur = cur.strip()
 
-        # never treat pure price/flag/weight lines as items
+        # never treat pure price-like lines as items
         if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
             i += 1
             continue
@@ -1031,9 +1204,10 @@ async def parse_receipt(
                 consume = 2
 
         if not has_hint:
-            before_total = (total_marker_idx is None) or (raw_idx < total_marker_idx)
+            # Fallback: accept items before totals marker
+            before_total = (totals_idx is None) or (raw_idx < totals_idx)
             if not before_total:
-                dropped_lines.append({"line": cur, "stage": "price_hint"})
+                dropped_lines.append({"line": cur, "stage": "no_price_hint_after_totals"})
                 i += 1
                 continue
 
@@ -1048,110 +1222,245 @@ async def parse_receipt(
             i += 1 + consume
             continue
 
-        kept.append((cur, cleaned))
+        kept.append((cur, cleaned, raw_idx))
         i += 1 + consume
 
-    # Parse initial items (fast path)
-    base_items: list[dict[str, Any]] = []
-    for raw_ln, cleaned_ln in kept:
+    # ------------------------------------------------------------
+    # Parse items (parallel enrichment bounded by semaphore + budget)
+    # ------------------------------------------------------------
+
+    base_url = _public_base_url(request)
+
+    async def process_one(raw_ln: str, cleaned_ln: str) -> Optional[dict[str, Any]]:
+        global ENRICH_SEM
         qty, name = _parse_quantity(cleaned_ln)
         name_cleaned = _clean_line(name)
         expanded = expand_abbreviations(name_cleaned)
 
-        if not expanded:
+        # If we are out of budget, skip enrichment.
+        if budget.expired():
+            final_name = expanded
+            source = "budget_expired"
+            score = 0.0
+            _ = ""
+        else:
+            if ENRICH_SEM:
+                async with ENRICH_SEM:
+                    final_name, source, score, _ = await enrich_full_name(
+                        raw_line=raw_ln,
+                        cleaned_name=name_cleaned,
+                        expanded_name=expanded,
+                        store_hint=store_hint,
+                        budget=budget,
+                    )
+            else:
+                final_name, source, score, _ = await enrich_full_name(
+                    raw_line=raw_ln,
+                    cleaned_name=name_cleaned,
+                    expanded_name=expanded,
+                    store_hint=store_hint,
+                    budget=budget,
+                )
+
+        final_name = (final_name or "").strip()
+        if not final_name:
+            return None
+        if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
+            return None
+        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
+            return None
+        if not _has_valid_item_words(final_name):
+            return None
+
+        category = _classify(final_name)
+        if only_food and category != "Food":
+            return None
+
+        nm = title_case(final_name)
+        return {
+            "name": nm,
+            "quantity": int(qty),
+            "category": category,
+            "image_url": _image_url_for_item(base_url, nm),
+        }
+
+    tasks = [process_one(raw_ln, cleaned_ln) for (raw_ln, cleaned_ln, _raw_idx) in kept]
+
+    # Gather with a hard timeout so we never exceed platform limits
+    hard_timeout = max(2.0, REQUEST_DEADLINE_SECONDS - 0.5)
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=hard_timeout)
+    except asyncio.TimeoutError:
+        # If enrichment pushes us too far, return whatever we can without failing the request.
+        results = []
+
+    parsed: list[dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, Exception):
             continue
-        if NOISE_RE.search(expanded) or _is_header_or_address(expanded):
-            continue
-        if not _has_valid_item_words(expanded):
+        if r:
+            parsed.append(r)
+
+    # Dedup and merge quantities
+    parsed = _dedupe_and_merge(parsed)
+
+    return parsed
+
+
+@app.post("/parse-receipt-debug")
+@app.post("/parse-receipt-debug/")
+async def parse_receipt_debug(
+    request: Request,
+    file: UploadFile | None = File(None),
+    image: UploadFile | None = File(None),
+    only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
+    debug: bool = Query(True, description="kept for compatibility; this endpoint always returns wrapper"),
+):
+    upload = file or image
+    if upload is None:
+        raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
+
+    raw = await upload.read()
+    if not raw:
+        return JSONResponse(status_code=400, content={"error": "Empty file"})
+
+    budget = ReqBudget(started=time.monotonic(), deadline=time.monotonic() + REQUEST_DEADLINE_SECONDS)
+
+    try:
+        pre = _preprocess_image_bytes(raw)
+        text = ocr_text_google_vision(pre)
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"OCR failed: {str(e)}",
+                "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS",
+            },
+        )
+
+    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
+    store_hint = detect_store_hint(raw_lines)
+    totals_idx = find_totals_marker_index(raw_lines)
+
+    dropped_lines: list[dict[str, Any]] = []
+
+    keep: list[tuple[int, str]] = []
+    skip_next_value = False
+
+    store_header_pat = STORE_HEADER_PATTERNS.get(store_hint) if store_hint else None
+
+    for i, ln in enumerate(raw_lines):
+        s = (ln or "").strip()
+        if not s:
             continue
 
-        base_items.append(
+        if store_header_pat and store_header_pat.match(s):
+            dropped_lines.append({"line": s, "stage": "store_header"})
+            continue
+
+        if skip_next_value:
+            if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or _is_price_like_line(s):
+                dropped_lines.append({"line": s, "stage": "noise_value"})
+                skip_next_value = False
+                continue
+            skip_next_value = False
+
+        if _is_header_or_address(s):
+            dropped_lines.append({"line": s, "stage": "junk_gate"})
+            continue
+
+        if NOISE_RE.search(s):
+            dropped_lines.append({"line": s, "stage": "junk_gate"})
+            skip_next_value = True
+            continue
+
+        keep.append((i, s))
+
+    kept: list[tuple[str, str, int]] = []
+    i = 0
+    while i < len(keep):
+        raw_idx, cur = keep[i]
+        cur = cur.strip()
+
+        if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
+            i += 1
+            continue
+
+        if not _looks_like_item(cur):
+            dropped_lines.append({"line": cur, "stage": "looks_like_item_raw"})
+            i += 1
+            continue
+
+        has_hint = _raw_line_has_price_or_qty_hint(cur)
+        consume = 0
+        n1 = keep[i + 1][1].strip() if i + 1 < len(keep) else ""
+        n2 = keep[i + 2][1].strip() if i + 2 < len(keep) else ""
+
+        if not has_hint:
+            if n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or _raw_line_has_price_or_qty_hint(n1)):
+                has_hint = True
+                consume = 1
+            elif n1 and _is_weight_or_unit_price_line(n1) and n2 and _is_price_like_line(n2):
+                has_hint = True
+                consume = 2
+            elif n2 and (_is_price_like_line(n2) or _is_weight_or_unit_price_line(n2)):
+                has_hint = True
+                consume = 2
+
+        if not has_hint:
+            before_total = (totals_idx is None) or (raw_idx < totals_idx)
+            if not before_total:
+                dropped_lines.append({"line": cur, "stage": "no_price_hint_after_totals"})
+                i += 1
+                continue
+
+        cleaned = _clean_line(cur)
+        if not cleaned:
+            dropped_lines.append({"line": cur, "stage": "clean_line_empty"})
+            i += 1 + consume
+            continue
+
+        if not _looks_like_item(cleaned):
+            dropped_lines.append({"line": cur, "stage": "looks_like_item_clean", "cleaned": cleaned})
+            i += 1 + consume
+            continue
+
+        kept.append((cur, cleaned, raw_idx))
+        i += 1 + consume
+
+    base_url = _public_base_url(request)
+
+    enrich_debug: list[dict[str, Any]] = []
+    parsed: list[dict[str, Any]] = []
+
+    for raw_ln, cleaned_ln, _raw_idx in kept:
+        qty, name = _parse_quantity(cleaned_ln)
+        name_cleaned = _clean_line(name)
+        expanded = expand_abbreviations(name_cleaned)
+
+        enriched, source, score, query_used = await enrich_full_name(
+            raw_line=raw_ln,
+            cleaned_name=name_cleaned,
+            expanded_name=expanded,
+            store_hint=store_hint,
+            budget=budget,
+        )
+
+        enrich_debug.append(
             {
                 "raw_line": raw_ln,
-                "cleaned_name": name_cleaned,
-                "expanded_name": expanded,
-                "quantity": int(qty),
+                "cleaned_line": cleaned_ln,
+                "qty": qty,
+                "name_cleaned": name_cleaned,
+                "name_expanded": expanded,
+                "name_enriched": enriched,
+                "enrich_source": source,
+                "enrich_score": score,
+                "enrich_query_used": query_used,
             }
         )
 
-    # Enrich names (time-budgeted) – if we’re out of time, skip and return expanded names.
-    async def _enrich_one(it: dict[str, Any], enrich_deadline: float) -> dict[str, Any]:
-        final = it["expanded_name"]
-        source = "none"
-        score = 0.0
-        try:
-            final, source, score = await enrich_full_name(
-                raw_line=it["raw_line"],
-                cleaned_name=it["cleaned_name"],
-                expanded_name=it["expanded_name"],
-                store_hint=store_hint,
-                deadline=enrich_deadline,
-            )
-        except Exception:
-            final = it["expanded_name"]
-            source = "none"
-            score = 0.0
-
-        it["final_name"] = (final or "").strip()
-        it["enrich_source"] = source
-        it["enrich_score"] = score
-        return it
-
-    # Compute enrichment deadline (separate budget inside request)
-    enrich_deadline = min(deadline, time.time() + ENRICH_TOTAL_BUDGET_SECONDS)
-
-    if ENABLE_NAME_ENRICH and time.time() + 0.25 < enrich_deadline and base_items:
-        # only enrich top N to avoid blowing up latency on big receipts
-        to_enrich = base_items[: max(0, ENRICH_MAX_ITEMS)]
-        rest = base_items[len(to_enrich):]
-
-        sem = anyio.Semaphore(6)
-
-        async def sem_task(it: dict[str, Any]) -> dict[str, Any]:
-            async with sem:
-                # If we’re too close to deadline, don’t start network
-                if time.time() + 0.20 >= enrich_deadline:
-                    it["final_name"] = it["expanded_name"]
-                    it["enrich_source"] = "none"
-                    it["enrich_score"] = 0.0
-                    return it
-                return await _enrich_one(it, enrich_deadline)
-
-        enriched_results: list[dict[str, Any]] = []
-        async with anyio.create_task_group() as tg:
-            results_container: list[dict[str, Any]] = []
-
-            async def run_and_collect(item: dict[str, Any]):
-                res = await sem_task(item)
-                results_container.append(res)
-
-            for it in to_enrich:
-                tg.start_soon(run_and_collect, it)
-
-            # task_group waits
-
-            enriched_results = results_container
-
-        # Preserve original order approximately
-        enriched_results.sort(key=lambda x: base_items.index(x) if x in base_items else 10**9)
-
-        # Items we didn’t enrich fall back to expanded
-        for it in rest:
-            it["final_name"] = it["expanded_name"]
-            it["enrich_source"] = "skipped"
-            it["enrich_score"] = 0.0
-
-        base_items = enriched_results + rest
-    else:
-        for it in base_items:
-            it["final_name"] = it["expanded_name"]
-            it["enrich_source"] = "none"
-            it["enrich_score"] = 0.0
-
-    # Build final parsed list
-    parsed: list[dict[str, Any]] = []
-    for it in base_items:
-        final_name = (it.get("final_name") or "").strip()
+        final_name = (enriched or "").strip()
         if not final_name:
             continue
         if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
@@ -1165,61 +1474,36 @@ async def parse_receipt(
         if only_food and category != "Food":
             continue
 
-        parsed.append(
-            {
-                "name": title_case(final_name),
-                "quantity": int(it["quantity"]),
-                "category": category,
-            }
-        )
+        nm = title_case(final_name)
+        parsed.append({"name": nm, "quantity": int(qty), "category": category, "image_url": _image_url_for_item(base_url, nm)})
 
     parsed = _dedupe_and_merge(parsed)
 
-    base_url = _public_base_url(request)
-    for it in parsed:
-        it["image_url"] = _image_url_for_item(base_url, it["name"])
-
-    return parsed
-
-
-@app.post("/parse-receipt-debug")
-@app.post("/parse-receipt-debug/")
-async def parse_receipt_debug(
-    request: Request,
-    file: UploadFile | None = File(None),
-    image: UploadFile | None = File(None),
-    only_food: bool = Query(True),
-):
-    start = time.time()
-    items = await parse_receipt(request, file=file, image=image, only_food=only_food, debug=True)
-
-    # Provide lightweight debug info without exploding response size
     return {
-        "items": items,
-        "timing": {
-            "request_budget_seconds": REQUEST_BUDGET_SECONDS,
-            "enrich_total_budget_seconds": ENRICH_TOTAL_BUDGET_SECONDS,
-            "elapsed_seconds": round(time.time() - start, 3),
-        },
-        "enrich": {
-            "enabled": ENABLE_NAME_ENRICH,
-            "max_items": ENRICH_MAX_ITEMS,
-            "min_conf": ENRICH_MIN_CONF,
-            "forced": ENRICH_FORCE_BEST_EFFORT,
-            "forced_floor": ENRICH_FORCE_SCORE_FLOOR,
-            "cache_size": len(_ENRICH_CACHE),
-            "learned_map_entries": len(_LEARNED_MAP),
-            "pending_entries": len(_PENDING),
-        },
-        "ocr": {
-            "mode": OCR_MODE,
-            "max_image_dim": MAX_IMAGE_DIM,
-        },
+        "items": parsed,
+        "raw_line_count": len(raw_lines),
+        "kept_line_count": len(kept),
+        "kept_lines": [c for (_r, c, _idx) in kept][:250],
+        "base_url": base_url,
+        "store_hint": store_hint,
+        "totals_idx": totals_idx,
+        "enrichment_debug": enrich_debug[:250],
+        "enrich_enabled": ENABLE_NAME_ENRICH,
+        "enrich_min_conf": ENRICH_MIN_CONF,
+        "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
+        "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
+        "off_page_size": OFF_PAGE_SIZE,
+        "off_search_urls": [OFF_SEARCH_URL_US, OFF_SEARCH_URL_WORLD],
+        "learned_map_entries": len(_LEARNED_MAP),
+        "pending_entries": len(_PENDING),
+        "budget_seconds": REQUEST_DEADLINE_SECONDS,
+        "max_off_lookups_per_request": MAX_OFF_LOOKUPS_PER_REQUEST,
+        "debug": {"dropped_lines": dropped_lines[:400]},
     }
 
 
 # ============================================================
-# Instacart list link
+# Instacart list link (unchanged)
 # ============================================================
 
 class InstacartLineItem(BaseModel):
@@ -1266,8 +1550,12 @@ async def instacart_create_list(req: InstacartCreateListRequest):
 
 
 # ============================================================
-# Image delivery
+# Image delivery (cached)
 # ============================================================
+
+_IMAGE_CACHE: dict[str, bytes] = {}
+_IMAGE_CONTENT_TYPE_CACHE: dict[str, str] = {}
+_MAX_CACHE_ITEMS = 2000
 
 PRODUCT_IMAGE_MAP: dict[str, str] = {
     "sargento artisan blends parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
@@ -1315,16 +1603,16 @@ async def fetch_image(url: str, headers: dict[str, str] | None = None) -> Option
 
 @app.get("/image")
 async def get_product_image(
-    name: str = Query(...),
-    upc: str | None = Query(None),
-    product_id: str | None = Query(None),
+    name: str = Query(..., description="product name to fetch image for"),
+    upc: str | None = Query(None, description="UPC/GTIN if available"),
+    product_id: str | None = Query(None, description="catalog product id if available"),
 ):
     ck = _cache_key(name, upc, product_id)
 
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
         return Response(content=_IMAGE_CACHE[ck], media_type=_IMAGE_CONTENT_TYPE_CACHE[ck])
 
-    # Packshot service first
+    # Prefer packshot service if configured
     if PACKSHOT_SERVICE_URL:
         qp: list[str] = []
         if product_id:
@@ -1350,7 +1638,6 @@ async def get_product_image(
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
 
-    # Fallback map
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
 
@@ -1362,7 +1649,6 @@ async def get_product_image(
         _trim_caches_if_needed()
         return Response(content=img_bytes, media_type=ctype)
 
-    # 1x1 fallback
     tiny_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
     )
@@ -1373,7 +1659,7 @@ async def get_product_image(
 
 
 # ============================================================
-# Admin endpoints
+# Admin endpoints (pending -> learned map)
 # ============================================================
 
 def _require_admin(key: str | None) -> None:
