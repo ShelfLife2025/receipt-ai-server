@@ -87,6 +87,9 @@ def _init_google_credentials_file() -> None:
 # Parsing helpers (noise filters, cleaning, quantity)
 # ============================================================
 
+# NOTE: tightened to avoid rejecting legitimate product lines.
+# Removed broad loyalty/discount tokens like member/rewards/points/save/savings/club/deal/off
+# which can appear in real item lines (or OCR can inject them).
 NOISE_PATTERNS = [
     # totals/tenders
     r"\btotal\b", r"\bsub\s*total\b", r"\bsubtotal\b", r"\btax\b", r"\bbalance\b",
@@ -98,13 +101,11 @@ NOISE_PATTERNS = [
     r"\bcard\b", r"\bchip\b", r"\bpin\b", r"\bsignature\b",
 
     # store/meta
-    r"\bregister\b", r"\bcashier\b", r"\bmanager\b", r"\bstore\b",
+    r"\bregister\b", r"\bcashier\b", r"\bmanager\b",
     r"\breceipt\b", r"\bserved\b", r"\bguest\b", r"\bvisit\b",
-    r"\bmember\b", r"\brewards?\b", r"\bpoints?\b",
 
-    # coupons/discounts
-    r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bsave\b", r"\bsavings\b", r"\byou saved\b",
-    r"\bclub\b", r"\bdeal\b", r"\boff\b",
+    # coupons/discounts (keep only "hard" terms)
+    r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\byou saved\b",
 
     # thank-you/footer
     r"\bthank you\b", r"\bthanks\b", r"\bcome again\b", r"\breturn\b", r"\brefund\b",
@@ -923,6 +924,7 @@ async def parse_receipt(
     request: Request,
     file: UploadFile | None = File(None),
     image: UploadFile | None = File(None),
+    only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(False, description="accepted but does not change response shape (use /parse-receipt-debug for wrapper)"),
 ):
     upload = file or image
@@ -948,22 +950,37 @@ async def parse_receipt(
     raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     store_hint = detect_store_hint(raw_lines)
 
+    # Find earliest subtotal/total marker in raw text (safe boundary for "items zone")
+    total_marker_idx: int | None = None
+    for idx, ln in enumerate(raw_lines):
+        if re.search(r"\b(sub\s*total|subtotal|total)\b", ln or "", flags=re.IGNORECASE):
+            total_marker_idx = idx
+            break
+
     # ------------------------------------------------------------
     # Filtering:
     # - Drop obvious headers/addresses/noise
     # - If a noise label is found, also drop the immediate next numeric value line (prevents pairing totals)
     # - Keep price-like lines so they can be used as lookahead hints for the prior item line
+    # - Drop store-name lines when store hint is detected (prevents "PUBLIX" becoming an item if hint gate relaxes)
     # ------------------------------------------------------------
 
     dropped_lines: list[dict[str, Any]] = []
 
     lines: list[str] = raw_lines[:]
-    keep: list[str] = []
+    keep: list[tuple[int, str]] = []
     skip_next_value = False
+
+    store_hint_lc = (store_hint or "").lower().strip()
 
     for i, ln in enumerate(lines):
         s = (ln or "").strip()
         if not s:
+            continue
+
+        # Drop store name line(s) if detected
+        if store_hint_lc and store_hint_lc in s.lower() and len(s) <= 40:
+            dropped_lines.append({"line": s, "stage": "store_hint"})
             continue
 
         # If previous line was a totals-like noise label, drop the immediate numeric value line too.
@@ -986,20 +1003,22 @@ async def parse_receipt(
             continue
 
         # Otherwise keep (including price-like lines; needed for pairing)
-        keep.append(s)
-
-    lines = keep
+        keep.append((i, s))
 
     # ------------------------------------------------------------
-    # Candidate extraction with lookahead pairing
-    # Publix pattern: ITEM_NAME then PRICE_LINE (or WEIGHT/UNIT line)
+    # Candidate extraction with lookahead pairing + fallback for OCR-missed prices
+    #
+    # Normal: Publix pattern = ITEM_NAME then PRICE_LINE (or WEIGHT/UNIT line).
+    # Fallback: If no price hint is found, accept item-looking lines ONLY if
+    #           they appear before the subtotal/total marker (items zone).
     # ------------------------------------------------------------
 
     kept: list[tuple[str, str]] = []  # (raw_item_line, cleaned_item_line)
 
     i = 0
-    while i < len(lines):
-        cur = lines[i].strip()
+    while i < len(keep):
+        raw_idx, cur = keep[i]
+        cur = cur.strip()
 
         # Never treat pure price/flag/weight lines as item lines.
         if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
@@ -1016,8 +1035,8 @@ async def parse_receipt(
 
         # Otherwise lookahead 1-2 lines for price/weight/unit-price hints.
         consume = 0
-        n1 = lines[i + 1].strip() if i + 1 < len(lines) else ""
-        n2 = lines[i + 2].strip() if i + 2 < len(lines) else ""
+        n1 = keep[i + 1][1].strip() if i + 1 < len(keep) else ""
+        n2 = keep[i + 2][1].strip() if i + 2 < len(keep) else ""
 
         if not has_hint:
             if n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or _raw_line_has_price_or_qty_hint(n1)):
@@ -1033,9 +1052,12 @@ async def parse_receipt(
                 consume = 2
 
         if not has_hint:
-            dropped_lines.append({"line": cur, "stage": "price_hint"})
-            i += 1
-            continue
+            # Fallback: accept as item if it occurs before subtotal/total (items zone)
+            before_total = (total_marker_idx is None) or (raw_idx < total_marker_idx)
+            if not before_total:
+                dropped_lines.append({"line": cur, "stage": "price_hint"})
+                i += 1
+                continue
 
         cleaned = _clean_line(cur)
         if not cleaned:
@@ -1080,7 +1102,7 @@ async def parse_receipt(
             continue
 
         category = _classify(final_name)
-        if category != "Food":
+        if only_food and category != "Food":
             continue
 
         parsed.append({"name": title_case(final_name), "quantity": int(qty), "category": category})
@@ -1101,6 +1123,7 @@ async def parse_receipt_debug(
     request: Request,
     file: UploadFile | None = File(None),
     image: UploadFile | None = File(None),
+    only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(True, description="kept for compatibility; this endpoint always returns wrapper"),
 ):
     """
@@ -1130,16 +1153,29 @@ async def parse_receipt_debug(
     raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     store_hint = detect_store_hint(raw_lines)
 
+    # Find earliest subtotal/total marker in raw text (safe boundary for "items zone")
+    total_marker_idx: int | None = None
+    for idx, ln in enumerate(raw_lines):
+        if re.search(r"\b(sub\s*total|subtotal|total)\b", ln or "", flags=re.IGNORECASE):
+            total_marker_idx = idx
+            break
+
     dropped_lines: list[dict[str, Any]] = []
 
     # Reuse the same logic as /parse-receipt, but keep extra debug structures
     lines: list[str] = raw_lines[:]
-    keep: list[str] = []
+    keep: list[tuple[int, str]] = []
     skip_next_value = False
 
-    for ln in lines:
+    store_hint_lc = (store_hint or "").lower().strip()
+
+    for i, ln in enumerate(lines):
         s = (ln or "").strip()
         if not s:
+            continue
+
+        if store_hint_lc and store_hint_lc in s.lower() and len(s) <= 40:
+            dropped_lines.append({"line": s, "stage": "store_hint"})
             continue
 
         if skip_next_value:
@@ -1158,14 +1194,13 @@ async def parse_receipt_debug(
             skip_next_value = True
             continue
 
-        keep.append(s)
-
-    lines = keep
+        keep.append((i, s))
 
     kept: list[tuple[str, str]] = []
     i = 0
-    while i < len(lines):
-        cur = lines[i].strip()
+    while i < len(keep):
+        raw_idx, cur = keep[i]
+        cur = cur.strip()
 
         if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
             i += 1
@@ -1178,8 +1213,8 @@ async def parse_receipt_debug(
 
         has_hint = _raw_line_has_price_or_qty_hint(cur)
         consume = 0
-        n1 = lines[i + 1].strip() if i + 1 < len(lines) else ""
-        n2 = lines[i + 2].strip() if i + 2 < len(lines) else ""
+        n1 = keep[i + 1][1].strip() if i + 1 < len(keep) else ""
+        n2 = keep[i + 2][1].strip() if i + 2 < len(keep) else ""
 
         if not has_hint:
             if n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or _raw_line_has_price_or_qty_hint(n1)):
@@ -1193,9 +1228,11 @@ async def parse_receipt_debug(
                 consume = 2
 
         if not has_hint:
-            dropped_lines.append({"line": cur, "stage": "price_hint"})
-            i += 1
-            continue
+            before_total = (total_marker_idx is None) or (raw_idx < total_marker_idx)
+            if not before_total:
+                dropped_lines.append({"line": cur, "stage": "price_hint"})
+                i += 1
+                continue
 
         cleaned = _clean_line(cur)
         if not cleaned:
@@ -1253,7 +1290,7 @@ async def parse_receipt_debug(
             continue
 
         category = _classify(final_name)
-        if category != "Food":
+        if only_food and category != "Food":
             continue
 
         parsed.append({"name": title_case(final_name), "quantity": int(qty), "category": category})
