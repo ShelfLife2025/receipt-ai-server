@@ -216,6 +216,11 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 # NOTE:
 # - We intentionally do NOT include a bare "\btotal\b" here, because it can appear in non-noise contexts.
 # - Totals detection is handled separately by find_totals_marker_index().
+#
+# Fixes added:
+# - "promotion" (your current patterns match "promo" but not "promotion")
+# - "order total" (your output shows it kept and turned into an item)
+# - "shopping center" (your output shows it kept and turned into an item)
 NOISE_PATTERNS = [
     # totals/tenders
     r"\bsub\s*total\b", r"\bsubtotal\b",
@@ -225,6 +230,8 @@ NOISE_PATTERNS = [
     r"\bpayment\b", r"\bdebit\b", r"\bcredit\b",
     r"\bvisa\b", r"\bmastercard\b", r"\bamex\b", r"\bdiscover\b",
     r"\bauth\b", r"\bapproval\b", r"\bapproved\b",
+    r"\border\s*total\b", r"\btotal\s+due\b", r"\bgrand\s+total\b",
+    r"^\s*total\s*$",  # safe: single-word "TOTAL" footer line
 
     # store/meta / POS metadata
     r"\bregister\b", r"\breg\b", r"\blane\b", r"\bterminal\b", r"\bterm\b", r"\bpos\b",
@@ -239,7 +246,7 @@ NOISE_PATTERNS = [
     r"\breturn\b", r"\brefund\b", r"\bpolicy\b",
 
     # coupons/discounts (hard terms only)
-    r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\byou saved\b", r"\bsavings\b",
+    r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bpromotion\b", r"\byou saved\b", r"\bsavings\b",
 
     # loyalty / points
     r"\bpoints\b", r"\bmember\b", r"\bloyalty\b", r"\bclub\b",
@@ -250,6 +257,10 @@ NOISE_PATTERNS = [
     # common “items count” footer/header
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
+
+    # shopping center / plaza location headers (prevents "Hollieanna Shopping Center")
+    r"\bshopping\s+center\b",
+    r"\bshopping\s+ctr\b",
 
     # specific junk token
     r"\bvov\b",
@@ -299,6 +310,10 @@ GENERIC_HEADER_WORDS_RE = re.compile(
     r"\b(super\s*markets?|supercenter|market|stores?|wholesale|pharmacy)\b",
     re.IGNORECASE,
 )
+
+# Publix-style leading "price + flags" (e.g., "2.69 T F POTATOES RUSSET" or "2 69 T F POTATOES RUSSET")
+LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s+\d{2})\s+", re.IGNORECASE)
+LEADING_FLAGS_RE = re.compile(r"^\s*(?:(?:[tTfF]\b)\s*){1,4}", re.IGNORECASE)
 
 
 def dedupe_key(s: str) -> str:
@@ -408,6 +423,7 @@ def _looks_like_item(line: str) -> bool:
         return False
     s = (line or "").strip()
 
+    # Hard exclusions
     if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or WEIGHT_ONLY_RE.match(s):
         return False
     if PER_UNIT_PRICE_RE.search(s) and not _has_valid_item_words(s):
@@ -435,9 +451,22 @@ def _looks_like_item(line: str) -> bool:
 
 
 def _clean_line(line: str) -> str:
+    """
+    Cleans an OCR line into a candidate item name.
+    Key fix: strip leading price + Publix flags so we don't return
+    '2.69 T F POTATOES RUSSET' as an item name.
+    """
     s = (line or "").strip()
+    if not s:
+        return ""
 
-    # Strip OCR-style trailing prices:
+    # 1) Strip leading price like "2.69 " or "2 69 " (OCR variants)
+    if LEADING_PRICE_RE.match(s):
+        s = LEADING_PRICE_RE.sub("", s).strip()
+        # Immediately strip leading single-letter flags (T/F) after price
+        s = LEADING_FLAGS_RE.sub("", s).strip()
+
+    # 2) Strip OCR-style trailing prices:
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
 
@@ -584,9 +613,6 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
     end = totals_idx if totals_idx is not None else n
 
     # Find first likely item-ish line before totals marker.
-    # We prefer a line that:
-    # - looks like an item
-    # - OR has price/qty hint and has valid item words
     start = 0
     scan_limit = min(end, 80)  # header is usually early
     for i in range(0, scan_limit):
@@ -602,7 +628,6 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
             start = max(0, i - 1)
             break
 
-    # Ensure end is sane
     end = max(start, end)
     return start, end
 
@@ -1107,7 +1132,6 @@ async def enrich_full_name(
             _enrich_cache_set(cache_key, learned, "learned_map", 1.0)
         return learned, "learned_map", 1.0, ""
 
-    # Behavior: if it needs an "official" name, try OFF more aggressively.
     always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
     should_try_off = always_off or _needs_official_name(expanded_name)
 
@@ -1117,14 +1141,12 @@ async def enrich_full_name(
             _enrich_cache_set(cache_key, expanded_name, "skipped_off", 0.0)
         return expanded_name, "skipped_off", 0.0, ""
 
-    # Enforce remaining time
     if budget.remaining() <= 0.9:
         _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
         if cache_key:
             _enrich_cache_set(cache_key, expanded_name, "low_budget", 0.0)
         return expanded_name, "low_budget", 0.0, ""
 
-    # Request-level OFF cap (lock-protected for concurrency correctness)
     if OFF_BUDGET_LOCK is None:
         OFF_BUDGET_LOCK = asyncio.Lock()
 
@@ -1179,8 +1201,6 @@ def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
     for idx in range(tail_start, n):
         ln = raw_lines[idx] or ""
         if TOTAL_MARKER_RE.search(ln):
-            # Require that the marker line is "receipt-ish": either has money or is short.
-            # This prevents random "total" words in long text blocks from being markers.
             if MONEY_TOKEN_RE.search(ln) or len(dedupe_key(ln).split()) <= 5:
                 candidates.append(idx)
 
@@ -1219,10 +1239,8 @@ def _extract_candidates_from_lines(
     """
     dropped_lines: list[dict[str, Any]] = []
 
-    # Work within a likely "items zone" to avoid pulling store headers.
     zone_start, zone_end = _detect_item_zone_indices(raw_lines)
 
-    # Build a filtered list preserving indices for pairing/joins.
     keep: list[tuple[int, str]] = []
     skip_next_value = False
     store_header_pat = STORE_HEADER_PATTERNS.get(store_hint) if store_hint else None
@@ -1233,17 +1251,14 @@ def _extract_candidates_from_lines(
         if not s:
             continue
 
-        # Drop store header line only (exact match)
         if store_header_pat and store_header_pat.match(s):
             dropped_lines.append({"line": s, "stage": "store_header_exact"})
             continue
 
-        # Drop probable store header variants in the top area only
         if _is_probable_store_header_line(s, store_hint=store_hint, position_idx=i - zone_start):
             dropped_lines.append({"line": s, "stage": "store_header_fuzzy"})
             continue
 
-        # If previous was totals-like noise, drop immediate numeric line
         if skip_next_value:
             if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or _is_price_like_line(s):
                 dropped_lines.append({"line": s, "stage": "noise_value"})
@@ -1262,10 +1277,6 @@ def _extract_candidates_from_lines(
 
         keep.append((i, s))
 
-    # Candidate extraction:
-    # - Skip pure price lines
-    # - Join split item lines when the second line is likely continuation and is followed by a price line
-    # - Consume attached price/unit lines and extract qty hints (e.g., "2 @ 3.99")
     kept: list[tuple[str, str, int, int]] = []  # (raw, cleaned, raw_idx, qty_hint)
 
     j = 0
@@ -1280,7 +1291,6 @@ def _extract_candidates_from_lines(
             j += 1
             continue
 
-        # Try join with next line if it looks like continuation and together looks like a better item name.
         next1 = keep[j + 1][1].strip() if j + 1 < len(keep) else ""
         next2 = keep[j + 2][1].strip() if j + 2 < len(keep) else ""
         joined = cur
@@ -1293,15 +1303,11 @@ def _extract_candidates_from_lines(
                 return False
             if NOISE_RE.search(a) or _is_header_or_address(a):
                 return False
-            # continuation lines often have mostly letters and few digits
             letters = len(re.findall(r"[A-Za-z]", a))
             digits = len(re.findall(r"\d", a))
             return letters >= 3 and digits <= 2 and len(a) <= 40
 
         if next1 and _is_continuation_line(next1):
-            # Only join if either:
-            # - the combined is still reasonable length, AND
-            # - a price/unit line follows (meaning these two are the item description block)
             combined = f"{cur} {next1}".strip()
             if len(combined) <= 90 and (next2 and (_is_price_like_line(next2) or _is_weight_or_unit_price_line(next2))):
                 joined = combined
@@ -1313,14 +1319,12 @@ def _extract_candidates_from_lines(
             j += 1 + join_used
             continue
 
-        # Determine if it has attached price/unit lines nearby; consume them so they don't become items.
         consume = 0
         qty_hint = 1
 
         n1 = keep[j + 1 + join_used][1].strip() if (j + 1 + join_used) < len(keep) else ""
         n2 = keep[j + 2 + join_used][1].strip() if (j + 2 + join_used) < len(keep) else ""
 
-        # If the next line is a unit-price line like "2 @ 3.99", capture qty hint.
         if n1 and UNIT_PRICE_RE.search(n1):
             qty_hint = _parse_qty_hint_from_attached_line(n1)
             consume = 1
@@ -1331,7 +1335,6 @@ def _extract_candidates_from_lines(
             if n2 and (_is_price_like_line(n2) or _is_weight_or_unit_price_line(n2) or WEIGHT_ONLY_RE.match(n2)):
                 consume = 2
 
-        # If no hint, enforce "before totals marker" fallback
         has_hint = _raw_line_has_price_or_qty_hint(candidate_raw) or (consume > 0)
         if not has_hint:
             before_total = (totals_idx is None) or (raw_idx < totals_idx)
@@ -1372,7 +1375,6 @@ async def _gather_partial(tasks: list[asyncio.Task], timeout: float) -> list[Any
             results.append(res)
         except Exception:
             continue
-    # cancel anything still pending
     for t in tasks:
         if not t.done():
             t.cancel()
@@ -1421,7 +1423,6 @@ async def parse_receipt(
     async def process_one(raw_ln: str, cleaned_ln: str, qty_hint: int) -> Optional[dict[str, Any]]:
         global ENRICH_SEM
 
-        # primary qty parse from item line, with fallback to attached "2 @ 3.99" hint
         qty, name = _parse_quantity(cleaned_ln)
         if qty == 1 and qty_hint > 1:
             qty = qty_hint
@@ -1429,7 +1430,6 @@ async def parse_receipt(
         name_cleaned = _clean_line(name)
         expanded = expand_abbreviations(name_cleaned)
 
-        # If we are out of budget, skip enrichment.
         if budget.expired():
             final_name = expanded
         else:
@@ -1477,7 +1477,6 @@ async def parse_receipt(
     for raw_ln, cleaned_ln, _raw_idx, qty_hint in kept:
         tasks.append(asyncio.create_task(process_one(raw_ln, cleaned_ln, qty_hint)))
 
-    # Hard cutoff: leave a small buffer to avoid gateway timeouts
     hard_timeout = max(2.0, REQUEST_DEADLINE_SECONDS - 0.6)
     results = await _gather_partial(tasks, timeout=hard_timeout)
 
@@ -1722,7 +1721,6 @@ async def get_product_image(
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
         return Response(content=_IMAGE_CACHE[ck], media_type=_IMAGE_CONTENT_TYPE_CACHE[ck])
 
-    # Prefer packshot service if configured
     if PACKSHOT_SERVICE_URL:
         qp: list[str] = []
         if product_id:
