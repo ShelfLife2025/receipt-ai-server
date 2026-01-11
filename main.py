@@ -216,11 +216,6 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 # NOTE:
 # - We intentionally do NOT include a bare "\btotal\b" here, because it can appear in non-noise contexts.
 # - Totals detection is handled separately by find_totals_marker_index().
-#
-# Fixes added:
-# - "promotion" (your current patterns match "promo" but not "promotion")
-# - "order total" (your output shows it kept and turned into an item)
-# - "shopping center" (your output shows it kept and turned into an item)
 NOISE_PATTERNS = [
     # totals/tenders
     r"\bsub\s*total\b", r"\bsubtotal\b",
@@ -315,6 +310,27 @@ GENERIC_HEADER_WORDS_RE = re.compile(
 LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s+\d{2})\s+", re.IGNORECASE)
 LEADING_FLAGS_RE = re.compile(r"^\s*(?:(?:[tTfF]\b)\s*){1,4}", re.IGNORECASE)
 
+# ============================================================
+# Safer wrapped-line stitching (prevents item A + item B merging)
+# ============================================================
+
+_MERGE_STOP_TOKENS = {
+    "and", "or", "of", "the", "a", "an", "with", "for",
+    "oz", "lb", "lbs", "g", "kg", "ct", "count", "pk", "pack", "ea", "each",
+}
+
+SIZE_ONLY_RE = re.compile(
+    r"^\s*(?:"
+    r"\d+(?:\.\d+)?\s*(?:oz|ounce|ounces|lb|lbs|pound|pounds|g|kg|ml|l)\b"
+    r"|"
+    r"\d+\s*(?:ct|count|pk|pack)\b"
+    r"|"
+    r"(?:family|value)\s+pack\b"
+    r"|"
+    r"(?:large|medium|small)\b"
+    r")\s*$",
+    re.IGNORECASE,
+)
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -322,6 +338,20 @@ def dedupe_key(s: str) -> str:
     s = re.sub(r"[^a-z0-9\s]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _token_set_for_overlap(s: str) -> set[str]:
+    k = dedupe_key(s)
+    toks = [t for t in k.split() if t and t not in _MERGE_STOP_TOKENS]
+    return set(toks)
+
+
+def _token_overlap_ratio(a: str, b: str) -> float:
+    A = _token_set_for_overlap(a)
+    B = _token_set_for_overlap(b)
+    if not A or not B:
+        return 0.0
+    return len(A & B) / max(1, min(len(A), len(B)))
 
 
 def title_case(s: str) -> str:
@@ -604,6 +634,8 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
     """
     Identify a likely items zone to reduce random pulls from top-of-receipt headers.
     Returns (start_idx_inclusive, end_idx_exclusive).
+
+    Tweaked to be slightly more inclusive to avoid missing legitimate item lines.
     """
     n = len(raw_lines)
     if n == 0:
@@ -614,7 +646,7 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
 
     # Find first likely item-ish line before totals marker.
     start = 0
-    scan_limit = min(end, 80)  # header is usually early
+    scan_limit = min(end, 120)  # be more inclusive than 80
     for i in range(0, scan_limit):
         s = (raw_lines[i] or "").strip()
         if not s:
@@ -622,10 +654,10 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
         if _is_header_or_address(s) or NOISE_RE.search(s):
             continue
         if _looks_like_item(s):
-            start = max(0, i - 1)
+            start = max(0, i - 3)  # include a bit more above first item
             break
         if _raw_line_has_price_or_qty_hint(s) and _has_valid_item_words(s):
-            start = max(0, i - 1)
+            start = max(0, i - 3)
             break
 
     end = max(start, end)
@@ -1236,6 +1268,12 @@ def _extract_candidates_from_lines(
     Returns:
       kept: list of (raw_item_line, cleaned_item_line, raw_idx, qty_hint)
       dropped_lines: debug records
+
+    Critical fixes:
+    - Prevents merging two separate items into one (the "Sargento + Starbucks" bug)
+      by tightening wrapped-line stitching rules.
+    - Makes candidate acceptance more inclusive to reduce missed grocery items,
+      relying on item-zone end (totals marker) + noise filters rather than "has_hint" gating.
     """
     dropped_lines: list[dict[str, Any]] = []
 
@@ -1279,6 +1317,59 @@ def _extract_candidates_from_lines(
 
     kept: list[tuple[str, str, int, int]] = []  # (raw, cleaned, raw_idx, qty_hint)
 
+    def _safe_should_join_item_lines(cur_line: str, next_line: str, next_next_line: str) -> bool:
+        """
+        Decide if next_line is a wrapped continuation of cur_line.
+
+        This is intentionally conservative:
+        - Never join if next_line looks like its OWN item line.
+        - Never join if next_line has price/qty hints.
+        - Prefer joins only when:
+          * cur ends with hyphen, OR
+          * next_line is "size-only" / descriptor-only, OR
+          * token overlap between the two lines is meaningfully high,
+            AND pricing immediately follows (next_next_line is price-ish).
+        """
+        if not cur_line or not next_line:
+            return False
+
+        cur = cur_line.strip()
+        nxt = next_line.strip()
+        nxt2 = (next_next_line or "").strip()
+
+        if not cur or not nxt:
+            return False
+
+        # Hard blocks for next line
+        if NOISE_RE.search(nxt) or _is_header_or_address(nxt):
+            return False
+        if _is_price_like_line(nxt) or _is_weight_or_unit_price_line(nxt) or WEIGHT_ONLY_RE.match(nxt):
+            return False
+        if _raw_line_has_price_or_qty_hint(nxt):
+            return False
+
+        # If next line stands alone as an item, do NOT join (prevents item A + item B merging)
+        # Note: We evaluate using cleaned version too, because raw may carry flags/prices.
+        if _looks_like_item(nxt) or _looks_like_item(_clean_line(nxt)):
+            return False
+
+        # If cur explicitly indicates wrap
+        if cur.endswith("-"):
+            return True
+
+        # Size-only / descriptor-only line (often on the following line)
+        if SIZE_ONLY_RE.match(nxt):
+            # Stronger if a price line follows, but not required
+            return True
+
+        # Require immediate price/weight line following the continuation to justify joining
+        if not (nxt2 and (_is_price_like_line(nxt2) or _is_weight_or_unit_price_line(nxt2) or WEIGHT_ONLY_RE.match(nxt2))):
+            return False
+
+        # Token overlap requirement (prevents unrelated joins)
+        overlap = _token_overlap_ratio(cur, nxt)
+        return overlap >= 0.35
+
     j = 0
     while j < len(keep):
         raw_idx, cur = keep[j]
@@ -1287,35 +1378,30 @@ def _extract_candidates_from_lines(
             j += 1
             continue
 
+        # Skip pure price/unit/weight lines (they attach to an item line, but are not items themselves)
         if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
             j += 1
             continue
 
         next1 = keep[j + 1][1].strip() if j + 1 < len(keep) else ""
         next2 = keep[j + 2][1].strip() if j + 2 < len(keep) else ""
+
         joined = cur
         join_used = 0
 
-        def _is_continuation_line(a: str) -> bool:
-            if not a:
-                return False
-            if _is_price_like_line(a) or _is_weight_or_unit_price_line(a) or WEIGHT_ONLY_RE.match(a):
-                return False
-            if NOISE_RE.search(a) or _is_header_or_address(a):
-                return False
-            letters = len(re.findall(r"[A-Za-z]", a))
-            digits = len(re.findall(r"\d", a))
-            return letters >= 3 and digits <= 2 and len(a) <= 40
-
-        if next1 and _is_continuation_line(next1):
+        # Wrapped-line stitching (tightened)
+        if next1 and _safe_should_join_item_lines(cur, next1, next2):
             combined = f"{cur} {next1}".strip()
-            if len(combined) <= 90 and (next2 and (_is_price_like_line(next2) or _is_weight_or_unit_price_line(next2))):
+            if len(combined) <= 90:
                 joined = combined
                 join_used = 1
 
         candidate_raw = joined
-        if not _looks_like_item(candidate_raw):
-            dropped_lines.append({"line": candidate_raw, "stage": "looks_like_item_raw"})
+
+        # Prefer the cleaned version for "looks like item" gating to avoid missing items due to price/flags
+        candidate_clean_probe = _clean_line(candidate_raw)
+        if not candidate_clean_probe or not _looks_like_item(candidate_clean_probe):
+            dropped_lines.append({"line": candidate_raw, "stage": "looks_like_item_clean_probe", "cleaned": candidate_clean_probe})
             j += 1 + join_used
             continue
 
@@ -1325,23 +1411,16 @@ def _extract_candidates_from_lines(
         n1 = keep[j + 1 + join_used][1].strip() if (j + 1 + join_used) < len(keep) else ""
         n2 = keep[j + 2 + join_used][1].strip() if (j + 2 + join_used) < len(keep) else ""
 
+        # Attach unit-price / price lines for quantity hints and to move the pointer correctly.
         if n1 and UNIT_PRICE_RE.search(n1):
             qty_hint = _parse_qty_hint_from_attached_line(n1)
             consume = 1
-            if n2 and (_is_price_like_line(n2) or WEIGHT_ONLY_RE.match(n2)):
+            if n2 and (_is_price_like_line(n2) or WEIGHT_ONLY_RE.match(n2) or _is_weight_or_unit_price_line(n2)):
                 consume = 2
         elif n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or WEIGHT_ONLY_RE.match(n1)):
             consume = 1
             if n2 and (_is_price_like_line(n2) or _is_weight_or_unit_price_line(n2) or WEIGHT_ONLY_RE.match(n2)):
                 consume = 2
-
-        has_hint = _raw_line_has_price_or_qty_hint(candidate_raw) or (consume > 0)
-        if not has_hint:
-            before_total = (totals_idx is None) or (raw_idx < totals_idx)
-            if not before_total:
-                dropped_lines.append({"line": candidate_raw, "stage": "no_price_hint_after_totals"})
-                j += 1 + join_used + consume
-                continue
 
         cleaned = _clean_line(candidate_raw)
         if not cleaned:
@@ -1349,6 +1428,7 @@ def _extract_candidates_from_lines(
             j += 1 + join_used + consume
             continue
 
+        # Final check
         if not _looks_like_item(cleaned):
             dropped_lines.append({"line": candidate_raw, "stage": "looks_like_item_clean", "cleaned": cleaned})
             j += 1 + join_used + consume
