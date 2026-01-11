@@ -56,7 +56,7 @@ ENRICH_FORCE_BEST_EFFORT = (os.getenv("ENRICH_FORCE_BEST_EFFORT", "1").strip() =
 ENRICH_FORCE_SCORE_FLOOR = float(os.getenv("ENRICH_FORCE_SCORE_FLOOR", "0.50"))
 
 # Hard cap: how many items per request are allowed to hit OpenFoodFacts
-MAX_OFF_LOOKUPS_PER_REQUEST = int(os.getenv("MAX_OFF_LOOKUPS_PER_REQUEST", "10"))
+MAX_OFF_LOOKUPS_PER_REQUEST = int(os.getenv("MAX_OFF_LOOKUPS_PER_REQUEST", "12"))
 
 # Concurrency
 OFF_CONCURRENCY = int(os.getenv("OFF_CONCURRENCY", "4"))
@@ -166,27 +166,33 @@ def _vision_client() -> vision.ImageAnnotatorClient:
     return vision.ImageAnnotatorClient()
 
 
-def _preprocess_image_bytes(data: bytes) -> bytes:
+def _preprocess_image_bytes(data: bytes, variant: int = 0) -> bytes:
     """
-    Speed-focused preprocessing:
-    - Normalize orientation
-    - Grayscale + contrast
-    - Downscale large images (big images slow OCR + increase latency)
+    Reliability-focused preprocessing (receipt OCR):
+    Variant 0: balanced (default)
+    Variant 1: stronger binarization (fallback)
     """
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
 
-    # Downscale to a reasonable max dimension
-    max_dim = int(os.getenv("OCR_MAX_DIM", "1600"))
+    # Downscale less aggressively (too much downscale loses small receipt text)
+    max_dim = int(os.getenv("OCR_MAX_DIM", "2400"))
     w, h = img.size
     scale = max(w, h) / max_dim if max(w, h) > max_dim else 1.0
     if scale > 1.0:
-        img = img.resize((max(1, int(w / scale)), max(1, int(h / scale))))
+        img = img.resize((max(1, int(w / scale)), max(1, int(h / scale))), Image.Resampling.LANCZOS)
 
     img = ImageOps.grayscale(img)
-    img = ImageOps.autocontrast(img)
-    img = img.filter(ImageFilter.SHARPEN)
+
+    if variant == 0:
+        img = ImageOps.autocontrast(img)
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=160, threshold=3))
+    else:
+        # Stronger: contrast + median + simple threshold
+        img = ImageOps.autocontrast(img)
+        img = img.filter(ImageFilter.MedianFilter(size=3))
+        img = img.point(lambda p: 255 if p > 160 else 0)
 
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
@@ -213,9 +219,6 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 # Parsing helpers (noise filters, cleaning, quantity)
 # ============================================================
 
-# NOTE:
-# - We intentionally do NOT include a bare "\btotal\b" here, because it can appear in non-noise contexts.
-# - Totals detection is handled separately by find_totals_marker_index().
 NOISE_PATTERNS = [
     # totals/tenders
     r"\bsub\s*total\b", r"\bsubtotal\b",
@@ -226,7 +229,7 @@ NOISE_PATTERNS = [
     r"\bvisa\b", r"\bmastercard\b", r"\bamex\b", r"\bdiscover\b",
     r"\bauth\b", r"\bapproval\b", r"\bapproved\b",
     r"\border\s*total\b", r"\btotal\s+due\b", r"\bgrand\s+total\b",
-    r"^\s*total\s*$",  # safe: single-word "TOTAL" footer line
+    r"^\s*total\s*$",
 
     # store/meta / POS metadata
     r"\bregister\b", r"\breg\b", r"\blane\b", r"\bterminal\b", r"\bterm\b", r"\bpos\b",
@@ -253,11 +256,11 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # shopping center / plaza location headers (prevents "Hollieanna Shopping Center")
+    # plaza/location headers
     r"\bshopping\s+center\b",
     r"\bshopping\s+ctr\b",
 
-    # specific junk token
+    # junk token
     r"\bvov\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
@@ -277,6 +280,7 @@ DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNOREC
 # Allow dot or comma decimals for OCR
 UNIT_PRICE_RE = re.compile(r"\b(\d+)\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
 
+# money tokens show up in item lines AND standalone price lines
 MONEY_TOKEN_RE = re.compile(r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|\b\d{1,6}\s+\d{2}\b")
 ONLY_MONEYISH_RE = re.compile(r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})?\s*$|^\s*\d+\s+\d{2}\s*$")
 PRICE_FLAG_RE = re.compile(r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{1,2}\s*$|^\s*\d+\s+\d{2}\s*[A-Za-z]{1,2}\s*$")
@@ -306,31 +310,10 @@ GENERIC_HEADER_WORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Publix-style leading "price + flags" (e.g., "2.69 T F POTATOES RUSSET" or "2 69 T F POTATOES RUSSET")
+# Publix-style leading "price + flags" (rare; some OCR layouts flip columns)
 LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s+\d{2})\s+", re.IGNORECASE)
 LEADING_FLAGS_RE = re.compile(r"^\s*(?:(?:[tTfF]\b)\s*){1,4}", re.IGNORECASE)
 
-# ============================================================
-# Safer wrapped-line stitching (prevents item A + item B merging)
-# ============================================================
-
-_MERGE_STOP_TOKENS = {
-    "and", "or", "of", "the", "a", "an", "with", "for",
-    "oz", "lb", "lbs", "g", "kg", "ct", "count", "pk", "pack", "ea", "each",
-}
-
-SIZE_ONLY_RE = re.compile(
-    r"^\s*(?:"
-    r"\d+(?:\.\d+)?\s*(?:oz|ounce|ounces|lb|lbs|pound|pounds|g|kg|ml|l)\b"
-    r"|"
-    r"\d+\s*(?:ct|count|pk|pack)\b"
-    r"|"
-    r"(?:family|value)\s+pack\b"
-    r"|"
-    r"(?:large|medium|small)\b"
-    r")\s*$",
-    re.IGNORECASE,
-)
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -338,20 +321,6 @@ def dedupe_key(s: str) -> str:
     s = re.sub(r"[^a-z0-9\s]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
-
-def _token_set_for_overlap(s: str) -> set[str]:
-    k = dedupe_key(s)
-    toks = [t for t in k.split() if t and t not in _MERGE_STOP_TOKENS]
-    return set(toks)
-
-
-def _token_overlap_ratio(a: str, b: str) -> float:
-    A = _token_set_for_overlap(a)
-    B = _token_set_for_overlap(b)
-    if not A or not B:
-        return 0.0
-    return len(A & B) / max(1, min(len(A), len(B)))
 
 
 def title_case(s: str) -> str:
@@ -396,10 +365,6 @@ def title_case(s: str) -> str:
 
 
 def _is_header_or_address(line: str) -> bool:
-    """
-    Conservative. We REMOVED the old STATE_RE heuristic because it drops real items like:
-    "FL ORANGES", "CA STRAWBERRIES", etc.
-    """
     s = (line or "").strip()
     if not s:
         return True
@@ -448,60 +413,41 @@ def _is_weight_or_unit_price_line(s: str) -> bool:
     return False
 
 
-def _looks_like_item(line: str) -> bool:
-    if not line:
+def _raw_line_has_price_or_qty_hint(s: str) -> bool:
+    if not s:
         return False
-    s = (line or "").strip()
-
-    # Hard exclusions
-    if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or WEIGHT_ONLY_RE.match(s):
-        return False
-    if PER_UNIT_PRICE_RE.search(s) and not _has_valid_item_words(s):
-        return False
-    if NOISE_RE.search(s) or _is_header_or_address(s):
-        return False
-
-    letters = len(re.findall(r"[A-Za-z]", s))
-    digits = len(re.findall(r"\d", s))
-    if letters == 0:
-        return False
-
-    # avoid lines that are basically numeric codes
-    if digits >= 5 and letters <= 2:
-        return False
-
-    if not _has_valid_item_words(s):
-        return False
-
-    # receipts can have long official names; 90 is a safe cap for OCR lines
-    if len(s) > 90:
-        return False
-
-    return True
+    if MONEY_TOKEN_RE.search(s):
+        return True
+    if UNIT_PRICE_RE.search(s):
+        return True
+    if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
+        return True
+    return False
 
 
 def _clean_line(line: str) -> str:
     """
     Cleans an OCR line into a candidate item name.
-    Key fix: strip leading price + Publix flags so we don't return
-    '2.69 T F POTATOES RUSSET' as an item name.
+    Removes embedded/trailing prices and flags so we return ONLY the name.
     """
     s = (line or "").strip()
     if not s:
         return ""
 
-    # 1) Strip leading price like "2.69 " or "2 69 " (OCR variants)
+    # Strip leading price + flags if OCR produced a left-column price.
     if LEADING_PRICE_RE.match(s):
         s = LEADING_PRICE_RE.sub("", s).strip()
-        # Immediately strip leading single-letter flags (T/F) after price
         s = LEADING_FLAGS_RE.sub("", s).strip()
 
-    # 2) Strip OCR-style trailing prices:
+    # Strip trailing prices (Publix often puts price at end)
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
 
+    # Strip possible trailing flags after price (e.g., "2.69 T F" or "6.70 F")
+    s = re.sub(r"(?:\s+[tTfF]){1,4}\s*$", "", s)
+
+    # Remove unit price artifacts
     s = UNIT_PRICE_RE.sub("", s).strip()
-    s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2}))+\s*$", "", s).strip()
     s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
 
     s = s.replace("—", "-")
@@ -533,10 +479,6 @@ def _parse_quantity(line: str) -> Tuple[int, str]:
 
 
 def _parse_qty_hint_from_attached_line(s: str) -> int:
-    """
-    If the receipt shows unit pricing line like "2 @ 3.99", capture qty=2.
-    Otherwise return 1.
-    """
     if not s:
         return 1
     m = UNIT_PRICE_RE.search(s)
@@ -587,83 +529,6 @@ def _image_url_for_item(base_url: str, name: str) -> str:
     return f"{base_url}/image?name={qname}"
 
 
-def _raw_line_has_price_or_qty_hint(s: str) -> bool:
-    if not s:
-        return False
-    if MONEY_TOKEN_RE.search(s):
-        return True
-    if UNIT_PRICE_RE.search(s):
-        return True
-    if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
-        return True
-    return False
-
-
-def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -> bool:
-    """
-    Drop store header-ish lines only in the header zone (top of receipt),
-    without impacting store-brand items lower in the receipt.
-    """
-    if not s:
-        return False
-    if position_idx > 14:
-        return False
-
-    ss = (s or "").strip()
-    key = dedupe_key(ss)
-    if not key:
-        return False
-
-    # If line is exactly store name or store name + generic header words, it's header.
-    if store_hint:
-        sh = dedupe_key(store_hint)
-        if sh and (key == sh or (sh in key and GENERIC_HEADER_WORDS_RE.search(ss) and len(key.split()) <= 6)):
-            # guard: if it looks like an item line (has price/qty hint), do not drop
-            if _raw_line_has_price_or_qty_hint(ss):
-                return False
-            return True
-
-    # Common header patterns regardless of store
-    if GENERIC_HEADER_WORDS_RE.search(ss) and not _raw_line_has_price_or_qty_hint(ss) and len(key.split()) <= 7:
-        return True
-
-    return False
-
-
-def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
-    """
-    Identify a likely items zone to reduce random pulls from top-of-receipt headers.
-    Returns (start_idx_inclusive, end_idx_exclusive).
-
-    Tweaked to be slightly more inclusive to avoid missing legitimate item lines.
-    """
-    n = len(raw_lines)
-    if n == 0:
-        return 0, 0
-
-    totals_idx = find_totals_marker_index(raw_lines)
-    end = totals_idx if totals_idx is not None else n
-
-    # Find first likely item-ish line before totals marker.
-    start = 0
-    scan_limit = min(end, 120)  # be more inclusive than 80
-    for i in range(0, scan_limit):
-        s = (raw_lines[i] or "").strip()
-        if not s:
-            continue
-        if _is_header_or_address(s) or NOISE_RE.search(s):
-            continue
-        if _looks_like_item(s):
-            start = max(0, i - 3)  # include a bit more above first item
-            break
-        if _raw_line_has_price_or_qty_hint(s) and _has_valid_item_words(s):
-            start = max(0, i - 3)
-            break
-
-    end = max(start, end)
-    return start, end
-
-
 # ============================================================
 # Store hint (used only as a hint; do not drop store-brand items)
 # ============================================================
@@ -690,16 +555,41 @@ STORE_HEADER_PATTERNS: dict[str, re.Pattern] = {
     "trader joe's": re.compile(r"^\s*trader\s+joe'?s\s*$", re.IGNORECASE),
 }
 
+
 def detect_store_hint(raw_lines: list[str]) -> str:
-    blob = " \n ".join(raw_lines[:120]).lower()
+    blob = " \n ".join(raw_lines[:160]).lower()
     for name, pat in STORE_HINTS:
         if pat.search(blob):
             return name
     return ""
 
 
+def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -> bool:
+    if not s:
+        return False
+    if position_idx > 18:
+        return False
+
+    ss = (s or "").strip()
+    key = dedupe_key(ss)
+    if not key:
+        return False
+
+    if store_hint:
+        sh = dedupe_key(store_hint)
+        if sh and (key == sh or (sh in key and GENERIC_HEADER_WORDS_RE.search(ss) and len(key.split()) <= 6)):
+            if _raw_line_has_price_or_qty_hint(ss):
+                return False
+            return True
+
+    if GENERIC_HEADER_WORDS_RE.search(ss) and not _raw_line_has_price_or_qty_hint(ss) and len(key.split()) <= 7:
+        return True
+
+    return False
+
+
 # ============================================================
-# Abbrev expansion + phrase preservation
+# Abbrev expansion + phrase preservation (aim: no abbreviations)
 # ============================================================
 
 ABBREV_TOKEN_MAP: dict[str, str] = {
@@ -708,16 +598,29 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "publx": "publix",
     "pub": "publix",
     "pbl": "publix",
+    "pbx": "publix",
+
+    # common brand/product abbreviations
+    "sar": "sargento",
+    "arts": "artisan",
+    "blnd": "blends",
+    "parm": "parmesan",
+    "nesp": "nespresso",
+    "pke": "pike",
+    "sprng": "spring",
+    "wht": "white",
+    "sdl": "seedless",
+
+    # bakery
+    "bg": "bagels",
+    "swr": "swirl",
+    "swrl": "swirl",
 
     # dairy
     "crm": "cream",
     "chs": "cheese",
     "whp": "whipping",
-    "whp.": "whipping",
     "hvy": "heavy",
-    "hvy.": "heavy",
-    "cr": "cream",
-    "chs.": "cheese",
     "bttr": "butter",
     "marg": "margarine",
     "yog": "yogurt",
@@ -725,7 +628,6 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     # staples
     "veg": "vegetable",
     "org": "organic",
-    "wb": "whole",
     "grd": "ground",
     "bf": "beef",
     "chk": "chicken",
@@ -747,13 +649,30 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "iso": "isopropyl",
     "isoprop": "isopropyl",
     "isopropyl": "isopropyl",
+
+    # misc receipt shorthand
+    "prm": "premium",
+    "grl": "grilled",
+    "pta": "potato",
+    "rst": "roast",
+    "rstd": "roasted",
+    "ov": "oven",
+
+    # Jack Daniel's style
+    "jd": "jack daniel's",
+    "tenn": "tennessee",
+    "hny": "honey",
+
+    # Publix cheese line
+    "sh": "sharp",
+    "chd": "cheddar",
+    "cut": "cut",
 }
 
 PHRASE_MAP: dict[str, str] = {
     "half and half": "half-and-half",
     "h and h": "half-and-half",
     "hnh": "half-and-half",
-    "hf and hf": "half-and-half",
 
     "heavy whipping cream": "heavy whipping cream",
     "cream cheese": "cream cheese",
@@ -784,18 +703,32 @@ def _normalize_for_phrase_match(s: str) -> str:
 
 
 def expand_abbreviations(name: str) -> str:
+    """
+    Goal: expand as many receipt abbreviations as possible so returned names
+    are not abbreviated even when OFF enrichment cannot run in time.
+    """
     if not name:
         return ""
     raw = (name or "").strip()
     raw = raw.replace("&", " and ")
     raw = raw.replace("-", " ")
-    raw = re.sub(r"[^\w\s]", " ", raw)
+    raw = re.sub(r"[^\w\s']", " ", raw)  # keep apostrophes for "daniel's"
     raw = re.sub(r"\s+", " ", raw).strip()
 
     toks = [t for t in raw.split(" ") if t]
     expanded: list[str] = []
-    for t in toks:
+
+    # Context-aware fix for "cr" ambiguity:
+    # - if next token suggests "cut" or "cracker", prefer "cracker"
+    # - otherwise default token map if present
+    for i, t in enumerate(toks):
         tl = t.lower()
+        nxt = toks[i + 1].lower() if i + 1 < len(toks) else ""
+
+        if tl == "cr" and nxt in {"cut", "cr", "ctr"}:
+            expanded.append("cracker")
+            continue
+
         expanded.append(ABBREV_TOKEN_MAP.get(tl, tl))
 
     joined = " ".join(expanded).strip()
@@ -809,13 +742,10 @@ def expand_abbreviations(name: str) -> str:
 
 
 def _looks_abbreviated(name: str) -> bool:
-    """
-    Decide when OFF enrichment is worth it.
-    """
     s = (name or "").strip()
     if not s:
         return False
-    toks = re.findall(r"[A-Za-z0-9]+", s)
+    toks = re.findall(r"[A-Za-z0-9']+", s)
     if not toks:
         return False
     short = sum(1 for t in toks if len(t) <= 3 and t.isalpha())
@@ -826,16 +756,10 @@ def _looks_abbreviated(name: str) -> bool:
 
 
 def _needs_official_name(name: str) -> bool:
-    """
-    When the goal is "full official name", we treat these as likely needing enrichment:
-    - single-token names (e.g., "BANANAS")
-    - short/abbrev looking names
-    - mostly uppercase short phrases
-    """
     s = (name or "").strip()
     if not s:
         return False
-    toks = [t for t in re.findall(r"[A-Za-z]+", s) if t]
+    toks = [t for t in re.findall(r"[A-Za-z']+", s) if t]
     if len(toks) <= 1:
         return True
     if _looks_abbreviated(s):
@@ -861,6 +785,7 @@ _ENRICH_SCORE_STOPWORDS = {
     "the", "and", "or", "of", "a", "an", "with", "for",
     "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
 }
+
 
 def _atomic_write_json(path: str, obj: Any) -> None:
     tmp = f"{path}.tmp"
@@ -1045,12 +970,6 @@ async def _off_get(url: str, params: dict[str, Any], timeout_s: float) -> Option
 
 
 async def _openfoodfacts_best_match(name: str, store_hint: str, budget: ReqBudget) -> Optional[Tuple[str, float, str]]:
-    """
-    Fast OFF matcher:
-    - fewer variants
-    - US first, world fallback
-    - early exit on strong score
-    """
     key = dedupe_key(name)
     if len(key) < 5:
         return None
@@ -1142,7 +1061,7 @@ async def enrich_full_name(
 ) -> Tuple[str, str, float, str]:
     """
     Returns: (final_name, source, score, query_used)
-    Bounded by request budget to avoid timeouts.
+    Always returns SOME name; never drops the item.
     """
     global OFF_BUDGET_LOCK
 
@@ -1173,7 +1092,8 @@ async def enrich_full_name(
             _enrich_cache_set(cache_key, expanded_name, "skipped_off", 0.0)
         return expanded_name, "skipped_off", 0.0, ""
 
-    if budget.remaining() <= 0.9:
+    # Protect item coverage: if we are low on time, skip OFF rather than risk timeouts
+    if budget.remaining() <= 0.8:
         _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
         if cache_key:
             _enrich_cache_set(cache_key, expanded_name, "low_budget", 0.0)
@@ -1221,22 +1141,210 @@ TOTAL_MARKER_RE = re.compile(
 
 def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
     """
-    Find the totals marker near the bottom of the receipt.
-    Fixes: "TOTAL SAVINGS" early in the receipt cutting off items.
+    Find totals marker near bottom.
+    Avoid cutting off early "Savings Summary" / "Total Savings" blocks.
     """
     n = len(raw_lines)
     if n == 0:
         return None
 
-    tail_start = max(0, n - max(50, n // 3))
+    tail_start = max(0, n - max(65, n // 3))
     candidates: list[int] = []
     for idx in range(tail_start, n):
         ln = raw_lines[idx] or ""
         if TOTAL_MARKER_RE.search(ln):
-            if MONEY_TOKEN_RE.search(ln) or len(dedupe_key(ln).split()) <= 5:
+            if MONEY_TOKEN_RE.search(ln) or len(dedupe_key(ln).split()) <= 6:
                 candidates.append(idx)
 
     return candidates[0] if candidates else None
+
+
+def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
+    """
+    Conservative header-skip, inclusive items-zone.
+    Start: first line that looks like an item-ish description OR has price/qty hints + words.
+    End: totals marker (or end).
+    """
+    n = len(raw_lines)
+    if n == 0:
+        return 0, 0
+
+    totals_idx = find_totals_marker_index(raw_lines)
+    end = totals_idx if totals_idx is not None else n
+
+    start = 0
+    scan_limit = min(end, 180)
+    for i in range(0, scan_limit):
+        s = (raw_lines[i] or "").strip()
+        if not s:
+            continue
+        if _is_header_or_address(s) or NOISE_RE.search(s):
+            continue
+        # item-ish if it has words + (price hint OR just looks like words)
+        if _has_valid_item_words(s) and (_raw_line_has_price_or_qty_hint(s) or len(dedupe_key(s).split()) >= 2):
+            start = max(0, i - 3)
+            break
+
+    end = max(start, end)
+    return start, end
+
+
+# ============================================================
+# Candidate extraction (FIX: never lose items due to timeout)
+# ============================================================
+
+class Candidate(BaseModel):
+    raw_line: str
+    cleaned_line: str
+    qty_hint: int
+
+
+def _next_nonempty(raw_lines: list[str], idx: int, zone_end: int) -> Tuple[str, int]:
+    j = idx
+    while j < zone_end:
+        s = (raw_lines[j] or "").strip()
+        if s:
+            return s, j
+        j += 1
+    return "", zone_end
+
+
+def _line_has_embedded_price(s: str) -> bool:
+    """
+    Item lines that include a price on the same line (common at Target/Walmart, sometimes OCR columns at Publix).
+    We treat as embedded-price if there is a money token and the line is not just price-only.
+    """
+    if not s:
+        return False
+    if _is_price_like_line(s) or WEIGHT_ONLY_RE.match(s):
+        return False
+    return bool(MONEY_TOKEN_RE.search(s))
+
+
+def _extract_candidates_from_lines(
+    raw_lines: list[str],
+    store_hint: str,
+) -> Tuple[list[Candidate], list[dict[str, Any]]]:
+    """
+    Deterministic, state-machine extraction:
+    - Always returns ALL item descriptions found in the items zone.
+    - Never relies on per-item async tasks; avoids partial returns.
+    - Handles produce/weight blocks (desc line -> unit price line -> total price line).
+    """
+    dropped_lines: list[dict[str, Any]] = []
+
+    zone_start, zone_end = _detect_item_zone_indices(raw_lines)
+    store_header_pat = STORE_HEADER_PATTERNS.get(store_hint) if store_hint else None
+
+    candidates: list[Candidate] = []
+
+    pending_raw: Optional[str] = None
+    pending_clean: Optional[str] = None
+    pending_qty_hint: int = 1
+
+    def _finalize_pending(reason: str) -> None:
+        nonlocal pending_raw, pending_clean, pending_qty_hint
+        if pending_raw and pending_clean and _has_valid_item_words(pending_clean):
+            candidates.append(Candidate(raw_line=pending_raw, cleaned_line=pending_clean, qty_hint=max(1, pending_qty_hint)))
+        else:
+            if pending_raw:
+                dropped_lines.append({"line": pending_raw, "stage": f"pending_drop:{reason}", "cleaned": pending_clean})
+        pending_raw = None
+        pending_clean = None
+        pending_qty_hint = 1
+
+    for i in range(zone_start, zone_end):
+        s = (raw_lines[i] or "").strip()
+        if not s:
+            continue
+
+        # Store header suppression (only near top; do NOT remove store-brand items later)
+        if store_header_pat and store_header_pat.match(s):
+            dropped_lines.append({"line": s, "stage": "store_header_exact"})
+            continue
+        if _is_probable_store_header_line(s, store_hint=store_hint, position_idx=i - zone_start):
+            dropped_lines.append({"line": s, "stage": "store_header_fuzzy"})
+            continue
+
+        # Noise lines
+        if _is_header_or_address(s):
+            dropped_lines.append({"line": s, "stage": "header_or_address"})
+            continue
+        if NOISE_RE.search(s):
+            # If we were waiting on a price line and we hit a noise block, finalize pending anyway.
+            if pending_raw:
+                _finalize_pending("hit_noise")
+            dropped_lines.append({"line": s, "stage": "noise"})
+            continue
+
+        # If this is a unit price / weight line, it belongs to the most recent item description.
+        if _is_weight_or_unit_price_line(s):
+            qh = _parse_qty_hint_from_attached_line(s)
+            if pending_raw:
+                pending_qty_hint = max(pending_qty_hint, qh)
+            elif candidates:
+                # attach to last candidate
+                last = candidates[-1]
+                last.qty_hint = max(int(last.qty_hint), qh)
+            else:
+                dropped_lines.append({"line": s, "stage": "orphan_unit_price"})
+            continue
+
+        # Pure price-only line: if pending, finalize; otherwise ignore.
+        if _is_price_like_line(s) or WEIGHT_ONLY_RE.match(s):
+            if pending_raw:
+                _finalize_pending("price_line")
+            else:
+                dropped_lines.append({"line": s, "stage": "price_only_no_pending"})
+            continue
+
+        # At this point, s is "description-ish". Clean it.
+        cleaned = _clean_line(s)
+        if not cleaned:
+            dropped_lines.append({"line": s, "stage": "clean_empty"})
+            continue
+
+        # If we have a pending description and we hit another description, finalize previous first.
+        if pending_raw:
+            _finalize_pending("new_desc")
+
+        # Reject lines with no meaningful words after cleaning
+        if not _has_valid_item_words(cleaned):
+            dropped_lines.append({"line": s, "stage": "no_item_words", "cleaned": cleaned})
+            continue
+
+        # If it has embedded price, it is a complete item description line.
+        if _line_has_embedded_price(s):
+            candidates.append(Candidate(raw_line=s, cleaned_line=cleaned, qty_hint=1))
+            continue
+
+        # Otherwise, decide: pending vs immediate.
+        # If the NEXT meaningful line is a unit-price/price-only line, treat this as pending.
+        next1, _ = _next_nonempty(raw_lines, i + 1, zone_end)
+        next2, _ = _next_nonempty(raw_lines, i + 2, zone_end)
+
+        if next1 and (_is_weight_or_unit_price_line(next1) or _is_price_like_line(next1) or WEIGHT_ONLY_RE.match(next1)):
+            pending_raw = s
+            pending_clean = cleaned
+            pending_qty_hint = 1
+            continue
+
+        # Some receipts: desc -> unit price -> price (skip one)
+        if next2 and (_is_weight_or_unit_price_line(next2) or _is_price_like_line(next2) or WEIGHT_ONLY_RE.match(next2)):
+            pending_raw = s
+            pending_clean = cleaned
+            pending_qty_hint = 1
+            continue
+
+        # Otherwise, accept immediately (covers stores that don't print price on same line or OCR missed it)
+        candidates.append(Candidate(raw_line=s, cleaned_line=cleaned, qty_hint=1))
+
+    # End of zone: finalize pending
+    if pending_raw:
+        _finalize_pending("zone_end")
+
+    # Guardrail: if we somehow got too few candidates, do NOT filter further here.
+    return candidates, dropped_lines
 
 
 # ============================================================
@@ -1259,208 +1367,6 @@ def health() -> dict[str, Any]:
     return {"ok": True}
 
 
-def _extract_candidates_from_lines(
-    raw_lines: list[str],
-    store_hint: str,
-    totals_idx: Optional[int],
-) -> Tuple[list[tuple[str, str, int, int]], list[dict[str, Any]]]:
-    """
-    Returns:
-      kept: list of (raw_item_line, cleaned_item_line, raw_idx, qty_hint)
-      dropped_lines: debug records
-
-    Critical fixes:
-    - Prevents merging two separate items into one (the "Sargento + Starbucks" bug)
-      by tightening wrapped-line stitching rules.
-    - Makes candidate acceptance more inclusive to reduce missed grocery items,
-      relying on item-zone end (totals marker) + noise filters rather than "has_hint" gating.
-    """
-    dropped_lines: list[dict[str, Any]] = []
-
-    zone_start, zone_end = _detect_item_zone_indices(raw_lines)
-
-    keep: list[tuple[int, str]] = []
-    skip_next_value = False
-    store_header_pat = STORE_HEADER_PATTERNS.get(store_hint) if store_hint else None
-
-    for i in range(zone_start, zone_end):
-        ln = raw_lines[i]
-        s = (ln or "").strip()
-        if not s:
-            continue
-
-        if store_header_pat and store_header_pat.match(s):
-            dropped_lines.append({"line": s, "stage": "store_header_exact"})
-            continue
-
-        if _is_probable_store_header_line(s, store_hint=store_hint, position_idx=i - zone_start):
-            dropped_lines.append({"line": s, "stage": "store_header_fuzzy"})
-            continue
-
-        if skip_next_value:
-            if ONLY_MONEYISH_RE.match(s) or PRICE_FLAG_RE.match(s) or _is_price_like_line(s):
-                dropped_lines.append({"line": s, "stage": "noise_value"})
-                skip_next_value = False
-                continue
-            skip_next_value = False
-
-        if _is_header_or_address(s):
-            dropped_lines.append({"line": s, "stage": "junk_gate"})
-            continue
-
-        if NOISE_RE.search(s):
-            dropped_lines.append({"line": s, "stage": "junk_gate"})
-            skip_next_value = True
-            continue
-
-        keep.append((i, s))
-
-    kept: list[tuple[str, str, int, int]] = []  # (raw, cleaned, raw_idx, qty_hint)
-
-    def _safe_should_join_item_lines(cur_line: str, next_line: str, next_next_line: str) -> bool:
-        """
-        Decide if next_line is a wrapped continuation of cur_line.
-
-        This is intentionally conservative:
-        - Never join if next_line looks like its OWN item line.
-        - Never join if next_line has price/qty hints.
-        - Prefer joins only when:
-          * cur ends with hyphen, OR
-          * next_line is "size-only" / descriptor-only, OR
-          * token overlap between the two lines is meaningfully high,
-            AND pricing immediately follows (next_next_line is price-ish).
-        """
-        if not cur_line or not next_line:
-            return False
-
-        cur = cur_line.strip()
-        nxt = next_line.strip()
-        nxt2 = (next_next_line or "").strip()
-
-        if not cur or not nxt:
-            return False
-
-        # Hard blocks for next line
-        if NOISE_RE.search(nxt) or _is_header_or_address(nxt):
-            return False
-        if _is_price_like_line(nxt) or _is_weight_or_unit_price_line(nxt) or WEIGHT_ONLY_RE.match(nxt):
-            return False
-        if _raw_line_has_price_or_qty_hint(nxt):
-            return False
-
-        # If next line stands alone as an item, do NOT join (prevents item A + item B merging)
-        # Note: We evaluate using cleaned version too, because raw may carry flags/prices.
-        if _looks_like_item(nxt) or _looks_like_item(_clean_line(nxt)):
-            return False
-
-        # If cur explicitly indicates wrap
-        if cur.endswith("-"):
-            return True
-
-        # Size-only / descriptor-only line (often on the following line)
-        if SIZE_ONLY_RE.match(nxt):
-            # Stronger if a price line follows, but not required
-            return True
-
-        # Require immediate price/weight line following the continuation to justify joining
-        if not (nxt2 and (_is_price_like_line(nxt2) or _is_weight_or_unit_price_line(nxt2) or WEIGHT_ONLY_RE.match(nxt2))):
-            return False
-
-        # Token overlap requirement (prevents unrelated joins)
-        overlap = _token_overlap_ratio(cur, nxt)
-        return overlap >= 0.35
-
-    j = 0
-    while j < len(keep):
-        raw_idx, cur = keep[j]
-        cur = (cur or "").strip()
-        if not cur:
-            j += 1
-            continue
-
-        # Skip pure price/unit/weight lines (they attach to an item line, but are not items themselves)
-        if _is_price_like_line(cur) or WEIGHT_ONLY_RE.match(cur) or _is_weight_or_unit_price_line(cur):
-            j += 1
-            continue
-
-        next1 = keep[j + 1][1].strip() if j + 1 < len(keep) else ""
-        next2 = keep[j + 2][1].strip() if j + 2 < len(keep) else ""
-
-        joined = cur
-        join_used = 0
-
-        # Wrapped-line stitching (tightened)
-        if next1 and _safe_should_join_item_lines(cur, next1, next2):
-            combined = f"{cur} {next1}".strip()
-            if len(combined) <= 90:
-                joined = combined
-                join_used = 1
-
-        candidate_raw = joined
-
-        # Prefer the cleaned version for "looks like item" gating to avoid missing items due to price/flags
-        candidate_clean_probe = _clean_line(candidate_raw)
-        if not candidate_clean_probe or not _looks_like_item(candidate_clean_probe):
-            dropped_lines.append({"line": candidate_raw, "stage": "looks_like_item_clean_probe", "cleaned": candidate_clean_probe})
-            j += 1 + join_used
-            continue
-
-        consume = 0
-        qty_hint = 1
-
-        n1 = keep[j + 1 + join_used][1].strip() if (j + 1 + join_used) < len(keep) else ""
-        n2 = keep[j + 2 + join_used][1].strip() if (j + 2 + join_used) < len(keep) else ""
-
-        # Attach unit-price / price lines for quantity hints and to move the pointer correctly.
-        if n1 and UNIT_PRICE_RE.search(n1):
-            qty_hint = _parse_qty_hint_from_attached_line(n1)
-            consume = 1
-            if n2 and (_is_price_like_line(n2) or WEIGHT_ONLY_RE.match(n2) or _is_weight_or_unit_price_line(n2)):
-                consume = 2
-        elif n1 and (_is_price_like_line(n1) or _is_weight_or_unit_price_line(n1) or WEIGHT_ONLY_RE.match(n1)):
-            consume = 1
-            if n2 and (_is_price_like_line(n2) or _is_weight_or_unit_price_line(n2) or WEIGHT_ONLY_RE.match(n2)):
-                consume = 2
-
-        cleaned = _clean_line(candidate_raw)
-        if not cleaned:
-            dropped_lines.append({"line": candidate_raw, "stage": "clean_line_empty"})
-            j += 1 + join_used + consume
-            continue
-
-        # Final check
-        if not _looks_like_item(cleaned):
-            dropped_lines.append({"line": candidate_raw, "stage": "looks_like_item_clean", "cleaned": cleaned})
-            j += 1 + join_used + consume
-            continue
-
-        kept.append((candidate_raw, cleaned, raw_idx, qty_hint))
-        j += 1 + join_used + consume
-
-    return kept, dropped_lines
-
-
-async def _gather_partial(tasks: list[asyncio.Task], timeout: float) -> list[Any]:
-    """
-    Gather tasks with an overall timeout, returning partial results (no "all-or-nothing").
-    """
-    results: list[Any] = []
-    start = time.monotonic()
-    for fut in asyncio.as_completed(tasks, timeout=timeout):
-        remaining = timeout - (time.monotonic() - start)
-        if remaining <= 0:
-            break
-        try:
-            res = await fut
-            results.append(res)
-        except Exception:
-            continue
-    for t in tasks:
-        if not t.done():
-            t.cancel()
-    return results
-
-
 @app.post("/parse-receipt", response_model=List[ParsedItem])
 @app.post("/parse-receipt/", response_model=List[ParsedItem])
 async def parse_receipt(
@@ -1480,93 +1386,124 @@ async def parse_receipt(
 
     budget = ReqBudget(started=time.monotonic(), deadline=time.monotonic() + REQUEST_DEADLINE_SECONDS)
 
+    # OCR (with a single optional fallback variant if we got suspiciously little text)
     try:
-        pre = _preprocess_image_bytes(raw)
-        text = ocr_text_google_vision(pre)
+        pre0 = _preprocess_image_bytes(raw, variant=0)
+        text0 = ocr_text_google_vision(pre0)
+        raw_lines0 = [ln.strip() for ln in (text0 or "").splitlines() if ln and ln.strip()]
     except Exception as e:
         return JSONResponse(
             status_code=500,
-            content={
-                "error": f"OCR failed: {str(e)}",
-                "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS",
-            },
+            content={"error": f"OCR failed: {str(e)}", "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS"},
         )
 
-    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
-    store_hint = detect_store_hint(raw_lines)
-    totals_idx = find_totals_marker_index(raw_lines)
+    # If OCR is weak and we have time, try variant 1 and choose whichever yields more candidates later.
+    raw_lines = raw_lines0
+    text = text0
 
-    kept, _dropped_lines = _extract_candidates_from_lines(raw_lines, store_hint=store_hint, totals_idx=totals_idx)
+    if len(raw_lines0) < 22 and budget.remaining() > 4.0:
+        try:
+            pre1 = _preprocess_image_bytes(raw, variant=1)
+            text1 = ocr_text_google_vision(pre1)
+            raw_lines1 = [ln.strip() for ln in (text1 or "").splitlines() if ln and ln.strip()]
+            # choose the one with more lines (proxy for more captured content)
+            if len(raw_lines1) > len(raw_lines0):
+                raw_lines = raw_lines1
+                text = text1
+        except Exception:
+            pass
+
+    store_hint = detect_store_hint(raw_lines)
+
+    candidates, _dropped_lines = _extract_candidates_from_lines(raw_lines, store_hint=store_hint)
 
     base_url = _public_base_url(request)
 
-    async def process_one(raw_ln: str, cleaned_ln: str, qty_hint: int) -> Optional[dict[str, Any]]:
-        global ENRICH_SEM
+    # PASS 1 (always): build items quickly with abbreviation expansion (ensures we return ALL items)
+    items: list[dict[str, Any]] = []
+    for c in candidates:
+        qty, nm = _parse_quantity(c.cleaned_line)
+        if qty == 1 and int(c.qty_hint) > 1:
+            qty = int(c.qty_hint)
 
-        qty, name = _parse_quantity(cleaned_ln)
-        if qty == 1 and qty_hint > 1:
-            qty = qty_hint
-
-        name_cleaned = _clean_line(name)
+        name_cleaned = _clean_line(nm)
         expanded = expand_abbreviations(name_cleaned)
+        final_name = expanded.strip()
 
-        if budget.expired():
-            final_name = expanded
-        else:
+        if not final_name:
+            continue
+        if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
+            continue
+        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
+            continue
+        if not _has_valid_item_words(final_name):
+            continue
+
+        category = _classify(final_name)
+        if only_food and category != "Food":
+            continue
+
+        pretty = title_case(final_name)
+        items.append(
+            {
+                "name": pretty,
+                "quantity": int(max(1, qty)),
+                "category": category,
+                "image_url": _image_url_for_item(base_url, pretty),
+                "_raw_line": c.raw_line,
+                "_name_cleaned": name_cleaned,
+                "_expanded": expanded,
+            }
+        )
+
+    # Deduplicate before enrichment to reduce OFF calls
+    items = _dedupe_and_merge(items)
+
+    # PASS 2 (best-effort): upgrade names to official product names via OFF/learned map,
+    # but NEVER at the expense of losing items. This loop will stop when time is low.
+    if ENABLE_NAME_ENRICH and items and budget.remaining() > 1.0:
+        for it in items:
+            if budget.remaining() <= 0.75:
+                break
+            expanded = (it.get("_expanded") or it["name"] or "").strip()
+            raw_line = (it.get("_raw_line") or it["name"] or "").strip()
+            name_cleaned = (it.get("_name_cleaned") or expanded).strip()
+
+            # Only spend OFF budget on names that still look abbreviated
+            if not _needs_official_name(expanded):
+                continue
+
             if ENRICH_SEM:
                 async with ENRICH_SEM:
-                    final_name, _source, _score, _q = await enrich_full_name(
-                        raw_line=raw_ln,
+                    enriched, _src, _score, _q = await enrich_full_name(
+                        raw_line=raw_line,
                         cleaned_name=name_cleaned,
                         expanded_name=expanded,
                         store_hint=store_hint,
                         budget=budget,
                     )
             else:
-                final_name, _source, _score, _q = await enrich_full_name(
-                    raw_line=raw_ln,
+                enriched, _src, _score, _q = await enrich_full_name(
+                    raw_line=raw_line,
                     cleaned_name=name_cleaned,
                     expanded_name=expanded,
                     store_hint=store_hint,
                     budget=budget,
                 )
 
-        final_name = (final_name or "").strip()
-        if not final_name:
-            return None
-        if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
-            return None
-        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
-            return None
-        if not _has_valid_item_words(final_name):
-            return None
+            enriched = (enriched or "").strip()
+            if enriched and _has_valid_item_words(enriched) and not NOISE_RE.search(enriched):
+                pretty = title_case(enriched)
+                it["name"] = pretty
+                it["image_url"] = _image_url_for_item(base_url, pretty)
 
-        category = _classify(final_name)
-        if only_food and category != "Food":
-            return None
+    # Remove internal debug fields
+    for it in items:
+        it.pop("_raw_line", None)
+        it.pop("_name_cleaned", None)
+        it.pop("_expanded", None)
 
-        nm = title_case(final_name)
-        return {
-            "name": nm,
-            "quantity": int(max(1, qty)),
-            "category": category,
-            "image_url": _image_url_for_item(base_url, nm),
-        }
-
-    tasks: list[asyncio.Task] = []
-    for raw_ln, cleaned_ln, _raw_idx, qty_hint in kept:
-        tasks.append(asyncio.create_task(process_one(raw_ln, cleaned_ln, qty_hint)))
-
-    hard_timeout = max(2.0, REQUEST_DEADLINE_SECONDS - 0.6)
-    results = await _gather_partial(tasks, timeout=hard_timeout)
-
-    parsed: list[dict[str, Any]] = []
-    for r in results:
-        if r:
-            parsed.append(r)
-
-    parsed = _dedupe_and_merge(parsed)
-    return parsed
+    return items
 
 
 @app.post("/parse-receipt-debug")
@@ -1589,50 +1526,69 @@ async def parse_receipt_debug(
     budget = ReqBudget(started=time.monotonic(), deadline=time.monotonic() + REQUEST_DEADLINE_SECONDS)
 
     try:
-        pre = _preprocess_image_bytes(raw)
-        text = ocr_text_google_vision(pre)
+        pre0 = _preprocess_image_bytes(raw, variant=0)
+        text0 = ocr_text_google_vision(pre0)
+        raw_lines0 = [ln.strip() for ln in (text0 or "").splitlines() if ln and ln.strip()]
     except Exception as e:
         return JSONResponse(
             status_code=500,
-            content={
-                "error": f"OCR failed: {str(e)}",
-                "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS",
-            },
+            content={"error": f"OCR failed: {str(e)}", "hint": "Check GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS"},
         )
 
-    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
+    raw_lines = raw_lines0
+    text = text0
+    ocr_variant_used = 0
+
+    if len(raw_lines0) < 22 and budget.remaining() > 4.0:
+        try:
+            pre1 = _preprocess_image_bytes(raw, variant=1)
+            text1 = ocr_text_google_vision(pre1)
+            raw_lines1 = [ln.strip() for ln in (text1 or "").splitlines() if ln and ln.strip()]
+            if len(raw_lines1) > len(raw_lines0):
+                raw_lines = raw_lines1
+                text = text1
+                ocr_variant_used = 1
+        except Exception:
+            pass
+
     store_hint = detect_store_hint(raw_lines)
     totals_idx = find_totals_marker_index(raw_lines)
 
-    kept, dropped_lines = _extract_candidates_from_lines(raw_lines, store_hint=store_hint, totals_idx=totals_idx)
+    candidates, dropped_lines = _extract_candidates_from_lines(raw_lines, store_hint=store_hint)
 
     base_url = _public_base_url(request)
 
-    enrich_debug: list[dict[str, Any]] = []
     parsed: list[dict[str, Any]] = []
+    enrich_debug: list[dict[str, Any]] = []
 
-    for raw_ln, cleaned_ln, _raw_idx, qty_hint in kept:
-        qty, name = _parse_quantity(cleaned_ln)
-        if qty == 1 and qty_hint > 1:
-            qty = qty_hint
+    for c in candidates:
+        qty, nm = _parse_quantity(c.cleaned_line)
+        if qty == 1 and int(c.qty_hint) > 1:
+            qty = int(c.qty_hint)
 
-        name_cleaned = _clean_line(name)
+        name_cleaned = _clean_line(nm)
         expanded = expand_abbreviations(name_cleaned)
 
-        enriched, source, score, query_used = await enrich_full_name(
-            raw_line=raw_ln,
-            cleaned_name=name_cleaned,
-            expanded_name=expanded,
-            store_hint=store_hint,
-            budget=budget,
-        )
+        enriched = expanded
+        source = "none"
+        score = 0.0
+        query_used = ""
+
+        if ENABLE_NAME_ENRICH and budget.remaining() > 0.9 and _needs_official_name(expanded):
+            enriched, source, score, query_used = await enrich_full_name(
+                raw_line=c.raw_line,
+                cleaned_name=name_cleaned,
+                expanded_name=expanded,
+                store_hint=store_hint,
+                budget=budget,
+            )
 
         enrich_debug.append(
             {
-                "raw_line": raw_ln,
-                "cleaned_line": cleaned_ln,
+                "raw_line": c.raw_line,
+                "cleaned_line": c.cleaned_line,
                 "qty": qty,
-                "qty_hint": qty_hint,
+                "qty_hint": c.qty_hint,
                 "name_cleaned": name_cleaned,
                 "name_expanded": expanded,
                 "name_enriched": enriched,
@@ -1656,13 +1612,13 @@ async def parse_receipt_debug(
         if only_food and category != "Food":
             continue
 
-        nm = title_case(final_name)
+        nm2 = title_case(final_name)
         parsed.append(
             {
-                "name": nm,
+                "name": nm2,
                 "quantity": int(max(1, qty)),
                 "category": category,
-                "image_url": _image_url_for_item(base_url, nm),
+                "image_url": _image_url_for_item(base_url, nm2),
             }
         )
 
@@ -1671,12 +1627,12 @@ async def parse_receipt_debug(
     return {
         "items": parsed,
         "raw_line_count": len(raw_lines),
-        "kept_line_count": len(kept),
-        "kept_lines": [c for (_r, c, _idx, _qh) in kept][:250],
-        "base_url": base_url,
+        "ocr_variant_used": ocr_variant_used,
         "store_hint": store_hint,
         "totals_idx": totals_idx,
-        "enrichment_debug": enrich_debug[:250],
+        "candidate_count": len(candidates),
+        "candidates": [c.cleaned_line for c in candidates][:400],
+        "enrichment_debug": enrich_debug[:300],
         "enrich_enabled": ENABLE_NAME_ENRICH,
         "enrich_min_conf": ENRICH_MIN_CONF,
         "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
@@ -1687,7 +1643,7 @@ async def parse_receipt_debug(
         "pending_entries": len(_PENDING),
         "budget_seconds": REQUEST_DEADLINE_SECONDS,
         "max_off_lookups_per_request": MAX_OFF_LOOKUPS_PER_REQUEST,
-        "debug": {"dropped_lines": dropped_lines[:400]},
+        "debug": {"dropped_lines": dropped_lines[:600]},
     }
 
 
