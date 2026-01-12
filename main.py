@@ -758,6 +758,39 @@ def expand_abbreviations(name: str) -> str:
     return re.sub(r"\s+", " ", norm).strip()
 
 
+def post_name_cleanup(name: str) -> str:
+    """
+    Final, conservative cleanup for OCR leftovers/truncations.
+    This runs after expand_abbreviations and after enrichment, and should only
+    touch obvious garbage so we don't accidentally change real product names.
+    """
+    s = (name or "").strip()
+    if not s:
+        return ""
+
+    low = s.lower().strip()
+
+    # Specific Publix deli truncation: "Mojo Oven Roasted H" -> "Mojo Oven Roasted Chicken"
+    if low == "mojo oven roasted h" or (low.startswith("mojo oven roasted") and low.endswith(" h")):
+        return "mojo oven roasted chicken"
+
+    toks = [t for t in low.split() if t]
+
+    # Remove meaningless trailing token like "sn"
+    # Example: "organic beans green sn" -> "organic beans green"
+    if toks and toks[-1] in {"sn"}:
+        toks = toks[:-1]
+        low = " ".join(toks).strip()
+
+    # Drop a trailing single-letter token (OCR noise) like "... h"
+    toks = [t for t in low.split() if t]
+    if toks and len(toks[-1]) == 1 and toks[-1].isalpha():
+        toks = toks[:-1]
+        low = " ".join(toks).strip()
+
+    return re.sub(r"\s+", " ", low).strip()
+
+
 def _looks_abbreviated(name: str) -> bool:
     s = (name or "").strip()
     if not s:
@@ -1445,7 +1478,7 @@ async def parse_receipt(
 
         name_cleaned = _clean_line(nm)
         expanded = expand_abbreviations(name_cleaned)
-        final_name = expanded.strip()
+        final_name = post_name_cleanup(expanded).strip()
 
         if not final_name:
             continue
@@ -1509,7 +1542,7 @@ async def parse_receipt(
                     budget=budget,
                 )
 
-            enriched = (enriched or "").strip()
+            enriched = post_name_cleanup(enriched).strip()
             if enriched and _has_valid_item_words(enriched) and not NOISE_RE.search(enriched):
                 pretty = title_case(enriched)
                 it["name"] = pretty
@@ -1588,6 +1621,7 @@ async def parse_receipt_debug(
 
         name_cleaned = _clean_line(nm)
         expanded = expand_abbreviations(name_cleaned)
+        expanded = post_name_cleanup(expanded)
 
         enriched = expanded
         source = "none"
@@ -1602,6 +1636,7 @@ async def parse_receipt_debug(
                 store_hint=store_hint,
                 budget=budget,
             )
+            enriched = post_name_cleanup(enriched)
 
         enrich_debug.append(
             {
