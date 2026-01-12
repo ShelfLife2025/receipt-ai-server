@@ -616,6 +616,7 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "pub": "publix",
     "pbl": "publix",
     "pbx": "publix",
+    "chees": "cheese",
 
     # common brand/product abbreviations
     "sar": "sargento",
