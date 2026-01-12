@@ -281,9 +281,16 @@ DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNOREC
 UNIT_PRICE_RE = re.compile(r"\b(\d+)\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
 
 # money tokens show up in item lines AND standalone price lines
-MONEY_TOKEN_RE = re.compile(r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|\b\d{1,6}\s+\d{2}\b")
-ONLY_MONEYISH_RE = re.compile(r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})?\s*$|^\s*\d+\s+\d{2}\s*$")
-PRICE_FLAG_RE = re.compile(r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{1,2}\s*$|^\s*\d+\s+\d{2}\s*[A-Za-z]{1,2}\s*$")
+# NOTE: include OCR-mangled decimals where '.' becomes 'o'/'O' (e.g., "3o5", "3o 5")
+MONEY_TOKEN_RE = re.compile(
+    r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|(?:\$?\s*)\b\d{1,6}\s*[oO]\s*\d{1,2}\b|\b\d{1,6}\s+\d{2}\b"
+)
+ONLY_MONEYISH_RE = re.compile(
+    r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})?\s*$|^\s*(?:\$?\s*)\d+\s*[oO]\s*\d{1,2}\s*$|^\s*\d+\s+\d{2}\s*$"
+)
+PRICE_FLAG_RE = re.compile(
+    r"^\s*(?:\$?\s*)\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{1,2}\s*$|^\s*(?:\$?\s*)\d+\s*[oO]\s*\d{1,2}\s*[A-Za-z]{1,2}\s*$|^\s*\d+\s+\d{2}\s*[A-Za-z]{1,2}\s*$"
+)
 
 WEIGHT_ONLY_RE = re.compile(r"^\s*\$?\d+(?:[.,]\s*\d+)?\s*(lb|lbs|oz|g|kg|ct)\s*$", re.IGNORECASE)
 PER_UNIT_PRICE_RE = re.compile(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", re.IGNORECASE)
@@ -311,7 +318,7 @@ GENERIC_HEADER_WORDS_RE = re.compile(
 )
 
 # Publix-style leading "price + flags" (rare; some OCR layouts flip columns)
-LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s+\d{2})\s+", re.IGNORECASE)
+LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s*[oO]\s*\d{1,2}|\d+\s+\d{2})\s+", re.IGNORECASE)
 LEADING_FLAGS_RE = re.compile(r"^\s*(?:(?:[tTfF]\b)\s*){1,4}", re.IGNORECASE)
 
 
@@ -395,6 +402,8 @@ def _is_price_like_line(s: str) -> bool:
         return True
     if re.match(r"^\s*-\s*\d+(?:[.,]\s*\d{2})\s*[A-Za-z]{0,2}\s*$", ss):
         return True
+    if re.match(r"^\s*-\s*\d+\s*[oO]\s*\d{1,2}\s*[A-Za-z]{0,2}\s*$", ss):
+        return True
     if re.match(r"^\s*\d+\s+\d{2}\s*[A-Za-z]{0,2}\s*$", ss):
         return True
     return False
@@ -441,10 +450,18 @@ def _clean_line(line: str) -> str:
 
     # Strip trailing prices (Publix often puts price at end)
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
+    s = re.sub(r"(?:\s+\$?\s*\d{1,6}\s*[oO]\s*\d{1,2}\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
 
     # Strip possible trailing flags after price (e.g., "2.69 T F" or "6.70 F")
     s = re.sub(r"(?:\s+[tTfF]){1,4}\s*$", "", s)
+
+    # Strip trailing cents-only token (common OCR tail: "... 99")
+    s = re.sub(r"\s+\d{2}\s*$", "", s)
+
+    # Strip trailing tax/flag junk (OCR often leaves these after prices or at end)
+    s = re.sub(r"\s+\b(?:T|F|TF|TX|TAX)\b\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+\b(?:T|F|TF|TX|TAX)\b\s*$", "", s, flags=re.IGNORECASE)
 
     # Remove unit price artifacts
     s = UNIT_PRICE_RE.sub("", s).strip()
@@ -1462,6 +1479,7 @@ async def parse_receipt(
     # PASS 2 (best-effort): upgrade names to official product names via OFF/learned map,
     # but NEVER at the expense of losing items. This loop will stop when time is low.
     if ENABLE_NAME_ENRICH and items and budget.remaining() > 1.0:
+        always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
         for it in items:
             if budget.remaining() <= 0.75:
                 break
@@ -1469,8 +1487,8 @@ async def parse_receipt(
             raw_line = (it.get("_raw_line") or it["name"] or "").strip()
             name_cleaned = (it.get("_name_cleaned") or expanded).strip()
 
-            # Only spend OFF budget on names that still look abbreviated
-            if not _needs_official_name(expanded):
+            # Name upgrade policy: to get full brand names, honor ALWAYS_OFF_ENRICH (default on).
+            if not (always_off or _needs_official_name(expanded)):
                 continue
 
             if ENRICH_SEM:
@@ -1561,6 +1579,8 @@ async def parse_receipt_debug(
     parsed: list[dict[str, Any]] = []
     enrich_debug: list[dict[str, Any]] = []
 
+    always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
+
     for c in candidates:
         qty, nm = _parse_quantity(c.cleaned_line)
         if qty == 1 and int(c.qty_hint) > 1:
@@ -1574,7 +1594,7 @@ async def parse_receipt_debug(
         score = 0.0
         query_used = ""
 
-        if ENABLE_NAME_ENRICH and budget.remaining() > 0.9 and _needs_official_name(expanded):
+        if ENABLE_NAME_ENRICH and budget.remaining() > 0.9 and (always_off or _needs_official_name(expanded)):
             enriched, source, score, query_used = await enrich_full_name(
                 raw_line=c.raw_line,
                 cleaned_name=name_cleaned,
