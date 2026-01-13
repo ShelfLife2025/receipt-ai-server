@@ -246,8 +246,11 @@ NOISE_PATTERNS = [
     # coupons/discounts (hard terms only)
     r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bpromotion\b", r"\byou saved\b", r"\bsavings\b",
 
-    # loyalty / points
-    r"\bpoints\b", r"\bmember\b", r"\bloyalty\b", r"\bclub\b",
+    # loyalty / points (tighter to avoid dropping real products like "Club Crackers")
+    r"\bloyalty\b",
+    r"\bmember\s*(?:id|#)\b",
+    r"\bpoints\s*(?:earned|balance|available|total)?\b",
+    r"\bclub\s+publix\b",
 
     # contact/web
     r"\bphone\b", r"\btel\b", r"\bwww\.", r"\.com\b",
@@ -256,9 +259,12 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # plaza/location headers
+    # plaza/location headers (expanded to block "Oak Grove Shoppes" etc.)
     r"\bshopping\s+center\b",
     r"\bshopping\s+ctr\b",
+    r"\bshoppes\b",
+    r"\bplaza\b",
+    r"\bcommons\b",
 
     # junk token
     r"\bvov\b",
@@ -410,6 +416,10 @@ def _is_header_or_address(line: str) -> bool:
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
 
+    # Plaza / location names (prevents "Oak Grove Shoppes" etc.)
+    if re.search(r"\b(shoppes|plaza|commons)\b", s, flags=re.IGNORECASE):
+        return True
+
     return False
 
 
@@ -537,6 +547,7 @@ def _parse_qty_hint_from_attached_line(s: str) -> int:
 
 
 def _classify(name: str) -> str:
+    # NOTE: names-only priority; classification is secondary.
     key = dedupe_key(name)
     tokens = set(key.split())
     if tokens & HOUSEHOLD_WORDS:
@@ -1454,6 +1465,9 @@ async def parse_receipt(
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(False, description="accepted but does not change response shape (use /parse-receipt-debug for wrapper)"),
 ):
+    # Enforce: ONLY GROCERY ITEMS (Food) in output, regardless of query param.
+    only_food = True
+
     upload = file or image
     if upload is None:
         raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
@@ -1571,10 +1585,13 @@ async def parse_receipt(
                 )
 
             enriched = post_name_cleanup(enriched).strip()
-            if enriched and _has_valid_item_words(enriched) and not NOISE_RE.search(enriched):
+            if enriched and _has_valid_item_words(enriched) and not NOISE_RE.search(enriched) and not _is_header_or_address(enriched):
                 pretty = title_case(enriched)
                 it["name"] = pretty
                 it["image_url"] = _image_url_for_item(base_url, pretty)
+
+        # Re-dedupe after enrichment (brand/full-name upgrades can create duplicates)
+        items = _dedupe_and_merge(items)
 
     # Remove internal debug fields
     for it in items:
@@ -1594,6 +1611,9 @@ async def parse_receipt_debug(
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(True, description="kept for compatibility; this endpoint always returns wrapper"),
 ):
+    # Enforce: ONLY GROCERY ITEMS (Food) in output, regardless of query param.
+    only_food = True
+
     upload = file or image
     if upload is None:
         raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
