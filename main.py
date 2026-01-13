@@ -44,27 +44,32 @@ OFF_BUDGET_LOCK: Optional[asyncio.Lock] = None
 # Keep this BELOW your platform gateway timeout.
 REQUEST_DEADLINE_SECONDS = float(os.getenv("REQUEST_DEADLINE_SECONDS", "12.0"))
 
-# OpenFoodFacts per-call timeout.
+# OpenFoodFacts/OpenProductsFacts per-call timeout.
 ENRICH_TIMEOUT_SECONDS = float(os.getenv("ENRICH_TIMEOUT_SECONDS", "1.8"))
 
 # Enrichment behavior
 ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
 ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.58"))
 
-# If true, allow a best-effort OFF result below min conf (still bounded by budgets)
+# If true, allow a best-effort OFF/OPF/OBF result below min conf (still bounded by budgets)
 ENRICH_FORCE_BEST_EFFORT = (os.getenv("ENRICH_FORCE_BEST_EFFORT", "1").strip() == "1")
 ENRICH_FORCE_SCORE_FLOOR = float(os.getenv("ENRICH_FORCE_SCORE_FLOOR", "0.50"))
 
-# Hard cap: how many items per request are allowed to hit OpenFoodFacts
+# Hard cap: how many items per request are allowed to hit external catalogs
 MAX_OFF_LOOKUPS_PER_REQUEST = int(os.getenv("MAX_OFF_LOOKUPS_PER_REQUEST", "12"))
 
 # Concurrency
 OFF_CONCURRENCY = int(os.getenv("OFF_CONCURRENCY", "4"))
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6"))
 
-# OpenFoodFacts endpoints & query sizing
+# Catalog endpoints & query sizing
 OFF_SEARCH_URL_US = (os.getenv("OFF_SEARCH_URL_US") or "https://us.openfoodfacts.org/cgi/search.pl").strip()
 OFF_SEARCH_URL_WORLD = (os.getenv("OFF_SEARCH_URL_WORLD") or "https://world.openfoodfacts.org/cgi/search.pl").strip()
+
+# Non-food fallbacks (same API shape as OFF)
+OPF_SEARCH_URL_WORLD = (os.getenv("OPF_SEARCH_URL_WORLD") or "https://world.openproductsfacts.org/cgi/search.pl").strip()
+OBF_SEARCH_URL_WORLD = (os.getenv("OBF_SEARCH_URL_WORLD") or "https://world.openbeautyfacts.org/cgi/search.pl").strip()
+
 OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "12"))
 OFF_FIELDS = (os.getenv("OFF_FIELDS") or "product_name,product_name_en,brands,quantity").strip()
 
@@ -246,11 +251,8 @@ NOISE_PATTERNS = [
     # coupons/discounts (hard terms only)
     r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bpromotion\b", r"\byou saved\b", r"\bsavings\b",
 
-    # loyalty / points (tighter to avoid dropping real products like "Club Crackers")
-    r"\bloyalty\b",
-    r"\bmember\s*(?:id|#)\b",
-    r"\bpoints\s*(?:earned|balance|available|total)?\b",
-    r"\bclub\s+publix\b",
+    # loyalty / points
+    r"\bpoints\b", r"\bmember\b", r"\bloyalty\b", r"\bclub\b",
 
     # contact/web
     r"\bphone\b", r"\btel\b", r"\bwww\.", r"\.com\b",
@@ -259,12 +261,9 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # plaza/location headers (expanded to block "Oak Grove Shoppes" etc.)
+    # plaza/location headers
     r"\bshopping\s+center\b",
     r"\bshopping\s+ctr\b",
-    r"\bshoppes\b",
-    r"\bplaza\b",
-    r"\bcommons\b",
 
     # junk token
     r"\bvov\b",
@@ -341,6 +340,12 @@ GENERIC_HEADER_WORDS_RE = re.compile(
 LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s*[oO]\s*\d{1,2}|\d+\s+\d{2})\s+", re.IGNORECASE)
 LEADING_FLAGS_RE = re.compile(r"^\s*(?:(?:[tTfF]\b)\s*){1,4}", re.IGNORECASE)
 
+# Harder store/header suppression anywhere (must be "header-like": no money/qty hints and short)
+STORE_WORDS_RE = re.compile(
+    r"\b(publix|wal[-\s]*mart|walmart|target|costco|kroger|aldi|whole\s+foods|trader\s+joe'?s)\b",
+    re.IGNORECASE,
+)
+
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -416,10 +421,6 @@ def _is_header_or_address(line: str) -> bool:
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
 
-    # Plaza / location names (prevents "Oak Grove Shoppes" etc.)
-    if re.search(r"\b(shoppes|plaza|commons)\b", s, flags=re.IGNORECASE):
-        return True
-
     return False
 
 
@@ -468,6 +469,36 @@ def _raw_line_has_price_or_qty_hint(s: str) -> bool:
         return True
     if re.search(r"\b[xX]\s*\d+\b", s) or re.search(r"\b\d+\s*[xX]\b", s):
         return True
+    return False
+
+
+def _is_store_or_header_line_anywhere(s: str) -> bool:
+    """
+    Strong filter to remove store-name/header lines wherever they occur,
+    but ONLY when they look like headers (no price/qty hints and short).
+    Prevents "PUBLIX SUPERMARKETS" or "WALMART" lines from leaking as items.
+    """
+    if not s:
+        return False
+    ss = (s or "").strip()
+    if not ss:
+        return True
+
+    if _raw_line_has_price_or_qty_hint(ss):
+        return False
+
+    key = dedupe_key(ss)
+    if not key:
+        return True
+
+    # Generic header words + very short
+    if GENERIC_HEADER_WORDS_RE.search(ss) and len(key.split()) <= 8:
+        return True
+
+    # Explicit store words + short-ish
+    if STORE_WORDS_RE.search(ss) and len(key.split()) <= 8:
+        return True
+
     return False
 
 
@@ -547,7 +578,6 @@ def _parse_qty_hint_from_attached_line(s: str) -> int:
 
 
 def _classify(name: str) -> str:
-    # NOTE: names-only priority; classification is secondary.
     key = dedupe_key(name)
     tokens = set(key.split())
     if tokens & HOUSEHOLD_WORDS:
@@ -761,7 +791,7 @@ def _normalize_for_phrase_match(s: str) -> str:
 def expand_abbreviations(name: str) -> str:
     """
     Goal: expand as many receipt abbreviations as possible so returned names
-    are not abbreviated even when OFF enrichment cannot run in time.
+    are not abbreviated even when catalog enrichment cannot run in time.
     """
     if not name:
         return ""
@@ -861,7 +891,7 @@ def _needs_official_name(name: str) -> bool:
 
 
 # ============================================================
-# Name enrichment (OFF + Learned Map + Pending collector)
+# Name enrichment (OFF + OPF/OBF + Learned Map + Pending collector)
 # ============================================================
 
 _ENRICH_CACHE: dict[str, Tuple[float, str, str, float]] = {}
@@ -873,8 +903,9 @@ _PENDING: dict[str, dict[str, Any]] = {}
 _ENRICH_SCORE_STOPWORDS = {
     "the", "and", "or", "of", "a", "an", "with", "for",
     "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
+    # store words should not dominate scoring
+    "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi",
 }
-
 
 def _atomic_write_json(path: str, obj: Any) -> None:
     tmp = f"{path}.tmp"
@@ -995,12 +1026,13 @@ def _score_candidate(query: str, candidate: str, store_hint: str = "") -> float:
 
     score = 0.70 * overlap + 0.30 * fuzzy
 
+    # Tiny bonus if store hint appears in candidate AND query (but do not let it dominate)
     if store_hint:
         sh = dedupe_key(store_hint)
         if sh and sh in c:
-            score += 0.06
+            score += 0.03
         if sh and sh in q and sh in c:
-            score += 0.04
+            score += 0.02
 
     if _has_any_digits(query) and _has_any_digits(candidate):
         score += 0.03
@@ -1058,7 +1090,40 @@ async def _off_get(url: str, params: dict[str, Any], timeout_s: float) -> Option
         return None
 
 
-async def _openfoodfacts_best_match(name: str, store_hint: str, budget: ReqBudget) -> Optional[Tuple[str, float, str]]:
+def _catalog_urls_for_category(category: str) -> list[tuple[str, str]]:
+    """
+    Returns [(source_name, url), ...] in priority order.
+    Food -> OFF (US, World)
+    Household -> OPF, then OBF (more likely to include soaps/hygiene)
+    """
+    cat = (category or "").strip().lower()
+    if cat == "household":
+        out: list[tuple[str, str]] = []
+        if OPF_SEARCH_URL_WORLD:
+            out.append(("openproductsfacts", OPF_SEARCH_URL_WORLD))
+        if OBF_SEARCH_URL_WORLD:
+            out.append(("openbeautyfacts", OBF_SEARCH_URL_WORLD))
+        return out
+
+    # default food
+    urls: list[tuple[str, str]] = []
+    if OFF_SEARCH_URL_US:
+        urls.append(("openfoodfacts_us", OFF_SEARCH_URL_US))
+    if OFF_SEARCH_URL_WORLD:
+        urls.append(("openfoodfacts_world", OFF_SEARCH_URL_WORLD))
+    return urls
+
+
+async def _catalog_best_match(
+    name: str,
+    store_hint: str,
+    category: str,
+    budget: ReqBudget
+) -> Optional[Tuple[str, float, str, str]]:
+    """
+    Searches the right catalogs for the category.
+    Returns (best_name, best_score, query_used, source_name)
+    """
     key = dedupe_key(name)
     if len(key) < 5:
         return None
@@ -1097,8 +1162,11 @@ async def _openfoodfacts_best_match(name: str, store_hint: str, budget: ReqBudge
     best_name: Optional[str] = None
     best_score = 0.0
     best_query = ""
+    best_source = ""
 
-    urls = [u for u in [OFF_SEARCH_URL_US, OFF_SEARCH_URL_WORLD] if u]
+    catalogs = _catalog_urls_for_category(category)
+    if not catalogs:
+        return None
 
     for q in qvars:
         if budget.expired():
@@ -1107,7 +1175,7 @@ async def _openfoodfacts_best_match(name: str, store_hint: str, budget: ReqBudge
         params = dict(params_base)
         params["search_terms"] = q
 
-        for url in urls:
+        for source_name, url in catalogs:
             if budget.expired():
                 break
 
@@ -1133,11 +1201,12 @@ async def _openfoodfacts_best_match(name: str, store_hint: str, budget: ReqBudge
                     best_score = s
                     best_name = cand
                     best_query = q
+                    best_source = source_name
                     if best_score >= 0.90:
-                        return best_name, best_score, best_query
+                        return best_name, best_score, best_query, best_source
 
     if best_name:
-        return best_name, best_score, best_query
+        return best_name, best_score, best_query, best_source
     return None
 
 
@@ -1146,6 +1215,7 @@ async def enrich_full_name(
     cleaned_name: str,
     expanded_name: str,
     store_hint: str,
+    category: str,
     budget: ReqBudget,
 ) -> Tuple[str, str, float, str]:
     """
@@ -1160,7 +1230,7 @@ async def enrich_full_name(
     if budget.expired():
         return expanded_name, "budget_expired", 0.0, ""
 
-    cache_key = dedupe_key(f"{store_hint}:{expanded_name}" if store_hint else expanded_name)
+    cache_key = dedupe_key(f"{store_hint}:{category}:{expanded_name}" if store_hint else f"{category}:{expanded_name}")
     if cache_key:
         cached = _enrich_cache_get(cache_key)
         if cached:
@@ -1168,20 +1238,24 @@ async def enrich_full_name(
 
     learned = _learned_map_lookup(raw_line, expanded_name, store_hint=store_hint)
     if learned:
+        # Reject learned results that look like headers/addresses/store lines
+        if _is_header_or_address(learned) or _is_store_or_header_line_anywhere(learned) or NOISE_RE.search(learned):
+            _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
+            return expanded_name, "learned_map_rejected_header", 0.0, ""
         if cache_key:
             _enrich_cache_set(cache_key, learned, "learned_map", 1.0)
         return learned, "learned_map", 1.0, ""
 
     always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
-    should_try_off = always_off or _needs_official_name(expanded_name)
+    should_try_catalog = always_off or _needs_official_name(expanded_name)
 
-    if not should_try_off:
+    if not should_try_catalog:
         _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
         if cache_key:
-            _enrich_cache_set(cache_key, expanded_name, "skipped_off", 0.0)
-        return expanded_name, "skipped_off", 0.0, ""
+            _enrich_cache_set(cache_key, expanded_name, "skipped_catalog", 0.0)
+        return expanded_name, "skipped_catalog", 0.0, ""
 
-    # Protect item coverage: if we are low on time, skip OFF rather than risk timeouts
+    # Protect item coverage: if we are low on time, skip catalog rather than risk timeouts
     if budget.remaining() <= 0.8:
         _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
         if cache_key:
@@ -1195,23 +1269,30 @@ async def enrich_full_name(
         if budget.off_used >= MAX_OFF_LOOKUPS_PER_REQUEST:
             _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
             if cache_key:
-                _enrich_cache_set(cache_key, expanded_name, "off_cap", 0.0)
-            return expanded_name, "off_cap", 0.0, ""
+                _enrich_cache_set(cache_key, expanded_name, "catalog_cap", 0.0)
+            return expanded_name, "catalog_cap", 0.0, ""
         budget.off_used += 1
 
-    off = await _openfoodfacts_best_match(expanded_name, store_hint=store_hint, budget=budget)
-    if off:
-        candidate, score, query_used = off
+    hit = await _catalog_best_match(expanded_name, store_hint=store_hint, category=category, budget=budget)
+    if hit:
+        candidate, score, query_used, source_name = hit
+
+        # Reject catalog candidates that look like store headers/addresses/noise
+        if _is_header_or_address(candidate) or _is_store_or_header_line_anywhere(candidate) or NOISE_RE.search(candidate):
+            _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
+            if cache_key:
+                _enrich_cache_set(cache_key, expanded_name, f"{source_name}_rejected_header", 0.0)
+            return expanded_name, f"{source_name}_rejected_header", 0.0, ""
 
         if score >= ENRICH_MIN_CONF:
             if cache_key:
-                _enrich_cache_set(cache_key, candidate, "openfoodfacts", score)
-            return candidate, "openfoodfacts", score, query_used
+                _enrich_cache_set(cache_key, candidate, source_name, score)
+            return candidate, source_name, score, query_used
 
         if ENRICH_FORCE_BEST_EFFORT and score >= ENRICH_FORCE_SCORE_FLOOR:
             if cache_key:
-                _enrich_cache_set(cache_key, candidate, "openfoodfacts_forced", score)
-            return candidate, "openfoodfacts_forced", score, query_used
+                _enrich_cache_set(cache_key, candidate, f"{source_name}_forced", score)
+            return candidate, f"{source_name}_forced", score, query_used
 
     _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
     if cache_key:
@@ -1267,7 +1348,7 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
         s = (raw_lines[i] or "").strip()
         if not s:
             continue
-        if _is_header_or_address(s) or NOISE_RE.search(s):
+        if _is_header_or_address(s) or NOISE_RE.search(s) or _is_store_or_header_line_anywhere(s):
             continue
         # item-ish if it has words + (price hint OR just looks like words)
         if _has_valid_item_words(s) and (_raw_line_has_price_or_qty_hint(s) or len(dedupe_key(s).split()) >= 2):
@@ -1334,7 +1415,11 @@ def _extract_candidates_from_lines(
     def _finalize_pending(reason: str) -> None:
         nonlocal pending_raw, pending_clean, pending_qty_hint
         if pending_raw and pending_clean and _has_valid_item_words(pending_clean):
-            candidates.append(Candidate(raw_line=pending_raw, cleaned_line=pending_clean, qty_hint=max(1, pending_qty_hint)))
+            # final guard: don't allow store/address/header candidates
+            if not _is_header_or_address(pending_clean) and not _is_store_or_header_line_anywhere(pending_clean) and not NOISE_RE.search(pending_clean):
+                candidates.append(Candidate(raw_line=pending_raw, cleaned_line=pending_clean, qty_hint=max(1, pending_qty_hint)))
+            else:
+                dropped_lines.append({"line": pending_raw, "stage": f"pending_drop:{reason}:header_guard", "cleaned": pending_clean})
         else:
             if pending_raw:
                 dropped_lines.append({"line": pending_raw, "stage": f"pending_drop:{reason}", "cleaned": pending_clean})
@@ -1353,6 +1438,13 @@ def _extract_candidates_from_lines(
             continue
         if _is_probable_store_header_line(s, store_hint=store_hint, position_idx=i - zone_start):
             dropped_lines.append({"line": s, "stage": "store_header_fuzzy"})
+            continue
+
+        # Strong store/header suppression anywhere (header-like only)
+        if _is_store_or_header_line_anywhere(s):
+            if pending_raw:
+                _finalize_pending("hit_store_header_anywhere")
+            dropped_lines.append({"line": s, "stage": "store_header_anywhere"})
             continue
 
         # Noise lines
@@ -1400,6 +1492,11 @@ def _extract_candidates_from_lines(
         # Reject lines with no meaningful words after cleaning
         if not _has_valid_item_words(cleaned):
             dropped_lines.append({"line": s, "stage": "no_item_words", "cleaned": cleaned})
+            continue
+
+        # Reject if cleaned looks like header/store/address
+        if _is_header_or_address(cleaned) or _is_store_or_header_line_anywhere(cleaned) or NOISE_RE.search(cleaned):
+            dropped_lines.append({"line": s, "stage": "desc_rejected_header_guard", "cleaned": cleaned})
             continue
 
         # If it has embedded price, it is a complete item description line.
@@ -1465,9 +1562,6 @@ async def parse_receipt(
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(False, description="accepted but does not change response shape (use /parse-receipt-debug for wrapper)"),
 ):
-    # Enforce: ONLY GROCERY ITEMS (Food) in output, regardless of query param.
-    only_food = True
-
     upload = file or image
     if upload is None:
         raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
@@ -1526,7 +1620,7 @@ async def parse_receipt(
             continue
         if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
             continue
-        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
+        if NOISE_RE.search(final_name) or _is_header_or_address(final_name) or _is_store_or_header_line_anywhere(final_name):
             continue
         if not _has_valid_item_words(final_name):
             continue
@@ -1548,10 +1642,10 @@ async def parse_receipt(
             }
         )
 
-    # Deduplicate before enrichment to reduce OFF calls
+    # Deduplicate before enrichment to reduce catalog calls
     items = _dedupe_and_merge(items)
 
-    # PASS 2 (best-effort): upgrade names to official product names via OFF/learned map,
+    # PASS 2 (best-effort): upgrade names to official product names via OFF/OPF/OBF/learned map,
     # but NEVER at the expense of losing items. This loop will stop when time is low.
     if ENABLE_NAME_ENRICH and items and budget.remaining() > 1.0:
         always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
@@ -1561,6 +1655,7 @@ async def parse_receipt(
             expanded = (it.get("_expanded") or it["name"] or "").strip()
             raw_line = (it.get("_raw_line") or it["name"] or "").strip()
             name_cleaned = (it.get("_name_cleaned") or expanded).strip()
+            category = (it.get("category") or "Food").strip()
 
             # Name upgrade policy: to get full brand names, honor ALWAYS_OFF_ENRICH (default on).
             if not (always_off or _needs_official_name(expanded)):
@@ -1573,6 +1668,7 @@ async def parse_receipt(
                         cleaned_name=name_cleaned,
                         expanded_name=expanded,
                         store_hint=store_hint,
+                        category=category,
                         budget=budget,
                     )
             else:
@@ -1581,17 +1677,23 @@ async def parse_receipt(
                     cleaned_name=name_cleaned,
                     expanded_name=expanded,
                     store_hint=store_hint,
+                    category=category,
                     budget=budget,
                 )
 
             enriched = post_name_cleanup(enriched).strip()
-            if enriched and _has_valid_item_words(enriched) and not NOISE_RE.search(enriched) and not _is_header_or_address(enriched):
+
+            # Final guard: never accept enrichment that looks like header/store/address/noise
+            if (
+                enriched
+                and _has_valid_item_words(enriched)
+                and not NOISE_RE.search(enriched)
+                and not _is_header_or_address(enriched)
+                and not _is_store_or_header_line_anywhere(enriched)
+            ):
                 pretty = title_case(enriched)
                 it["name"] = pretty
                 it["image_url"] = _image_url_for_item(base_url, pretty)
-
-        # Re-dedupe after enrichment (brand/full-name upgrades can create duplicates)
-        items = _dedupe_and_merge(items)
 
     # Remove internal debug fields
     for it in items:
@@ -1611,9 +1713,6 @@ async def parse_receipt_debug(
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(True, description="kept for compatibility; this endpoint always returns wrapper"),
 ):
-    # Enforce: ONLY GROCERY ITEMS (Food) in output, regardless of query param.
-    only_food = True
-
     upload = file or image
     if upload is None:
         raise HTTPException(status_code=422, detail="Missing receipt file field (expected multipart 'file' or 'image').")
@@ -1671,6 +1770,8 @@ async def parse_receipt_debug(
         expanded = expand_abbreviations(name_cleaned)
         expanded = post_name_cleanup(expanded)
 
+        category_guess = _classify(expanded)
+
         enriched = expanded
         source = "none"
         score = 0.0
@@ -1682,6 +1783,7 @@ async def parse_receipt_debug(
                 cleaned_name=name_cleaned,
                 expanded_name=expanded,
                 store_hint=store_hint,
+                category=category_guess,
                 budget=budget,
             )
             enriched = post_name_cleanup(enriched)
@@ -1695,6 +1797,7 @@ async def parse_receipt_debug(
                 "name_cleaned": name_cleaned,
                 "name_expanded": expanded,
                 "name_enriched": enriched,
+                "category": category_guess,
                 "enrich_source": source,
                 "enrich_score": score,
                 "enrich_query_used": query_used,
@@ -1706,7 +1809,7 @@ async def parse_receipt_debug(
             continue
         if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
             continue
-        if NOISE_RE.search(final_name) or _is_header_or_address(final_name):
+        if NOISE_RE.search(final_name) or _is_header_or_address(final_name) or _is_store_or_header_line_anywhere(final_name):
             continue
         if not _has_valid_item_words(final_name):
             continue
@@ -1741,7 +1844,8 @@ async def parse_receipt_debug(
         "enrich_force_best_effort": ENRICH_FORCE_BEST_EFFORT,
         "enrich_force_score_floor": ENRICH_FORCE_SCORE_FLOOR,
         "off_page_size": OFF_PAGE_SIZE,
-        "off_search_urls": [OFF_SEARCH_URL_US, OFF_SEARCH_URL_WORLD],
+        "catalog_urls_food": [OFF_SEARCH_URL_US, OFF_SEARCH_URL_WORLD],
+        "catalog_urls_household": [OPF_SEARCH_URL_WORLD, OBF_SEARCH_URL_WORLD],
         "learned_map_entries": len(_LEARNED_MAP),
         "pending_entries": len(_PENDING),
         "budget_seconds": REQUEST_DEADLINE_SECONDS,
