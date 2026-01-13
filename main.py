@@ -276,6 +276,20 @@ ADDR_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNORECASE)
+STATE_ABBR_RE = re.compile(
+    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b",
+    re.IGNORECASE,
+)
+
+# Lines like: "ORLANDO FL" or "ALTAMONTE SPRINGS, FL" or "ORLANDO FL 32801"
+CITY_STATE_LINE_RE = re.compile(
+    r"^\s*[A-Za-z][A-Za-z\s\.'-]{2,}\s*,?\s*"
+    r"(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)"
+    r"(?:\s+\d{5}(?:-\d{4})?)?\s*$",
+    re.IGNORECASE,
+)
+
+ADDR_META_RE = re.compile(r"\b(suite|ste|unit|apt|po\s*box|p\.?\s*o\.?\s*box)\b", re.IGNORECASE)
 
 # Allow dot or comma decimals for OCR
 UNIT_PRICE_RE = re.compile(r"\b(\d+)\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
