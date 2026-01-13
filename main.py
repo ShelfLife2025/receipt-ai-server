@@ -251,6 +251,9 @@ NOISE_PATTERNS = [
     # coupons/discounts (hard terms only)
     r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bpromotion\b", r"\byou saved\b", r"\bsavings\b",
 
+    # promo/contest lines (ADDED)
+    r"\bwin\b", r"\benter\b", r"\bsweepstakes\b", r"\bgiveaway\b", r"\bgrocer(?:y|ies)\b",
+
     # loyalty / points
     r"\bpoints\b", r"\bmember\b", r"\bloyalty\b", r"\bclub\b",
 
@@ -261,9 +264,11 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # plaza/location headers
+    # plaza/location headers (ADDED plaza/shoppes)
     r"\bshopping\s+center\b",
     r"\bshopping\s+ctr\b",
+    r"\bplaza\b",
+    r"\bshoppes\b",
 
     # junk token
     r"\bvov\b",
@@ -346,6 +351,16 @@ STORE_WORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ============================================================
+# ADDED: Promo + location-header patterns (fixes “FOR $1,000 IN GROCERIES”
+# and “Publix Plaza at …” being treated as items)
+# ============================================================
+
+PROMO_REGEX = re.compile(r"(?i)\b(for\s*\$\s*\d+|win|enter|sweepstakes|giveaway|grocer(?:y|ies))\b")
+STORE_LOCATION_HEADER_RE = re.compile(
+    r"(?i)\b(publix|walmart|target|aldi|schnucks|kroger|costco|sam'?s)\b.*\b("
+    r"plaza|center|shoppes|shopping|market|store|supercenter|pharmacy)\b"
+)
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -399,6 +414,12 @@ def title_case(s: str) -> str:
 def _is_header_or_address(line: str) -> bool:
     s = (line or "").strip()
     if not s:
+        return True
+
+    # ADDED: promo lines + store location headers
+    if PROMO_REGEX.search(s):
+        return True
+    if STORE_LOCATION_HEADER_RE.search(s):
         return True
 
     # Phone / ZIP / date / time
@@ -484,6 +505,13 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     if not ss:
         return True
 
+    # ADDED: promo + store location headers (only if header-like)
+    if not _raw_line_has_price_or_qty_hint(ss):
+        if PROMO_REGEX.search(ss):
+            return True
+        if STORE_LOCATION_HEADER_RE.search(ss):
+            return True
+
     if _raw_line_has_price_or_qty_hint(ss):
         return False
 
@@ -500,6 +528,37 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
         return True
 
     return False
+
+
+# ============================================================
+# OPTIONAL: parity helpers (not used by pipeline, but included per request)
+# ============================================================
+
+def is_noise_line(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return True
+    if _is_header_or_address(t):
+        return True
+    if _is_store_or_header_line_anywhere(t):
+        return True
+    if NOISE_RE.search(t):
+        return True
+    letters = sum(c.isalpha() for c in t)
+    if letters < 2:
+        return True
+    return False
+
+
+def looks_like_item(cleaned: str) -> bool:
+    t = (cleaned or "").strip()
+    if not t:
+        return False
+    if is_noise_line(t):
+        return False
+    if not _has_valid_item_words(t):
+        return False
+    return True
 
 
 def _clean_line(line: str) -> str:
