@@ -1093,25 +1093,33 @@ async def _off_get(url: str, params: dict[str, Any], timeout_s: float) -> Option
 def _catalog_urls_for_category(category: str) -> list[tuple[str, str]]:
     """
     Returns [(source_name, url), ...] in priority order.
-    Food -> OFF (US, World)
-    Household -> OPF, then OBF (more likely to include soaps/hygiene)
+
+    Key improvement:
+    - ALWAYS include OPF/OBF as fallbacks even if classification guessed Food.
+    - ALSO include OFF as a fallback even for Household items.
+
+    Priority:
+    - Food: OFF (US, World) -> OPF -> OBF
+    - Household: OPF -> OBF -> OFF (US, World)
     """
     cat = (category or "").strip().lower()
-    if cat == "household":
-        out: list[tuple[str, str]] = []
-        if OPF_SEARCH_URL_WORLD:
-            out.append(("openproductsfacts", OPF_SEARCH_URL_WORLD))
-        if OBF_SEARCH_URL_WORLD:
-            out.append(("openbeautyfacts", OBF_SEARCH_URL_WORLD))
-        return out
 
-    # default food
-    urls: list[tuple[str, str]] = []
+    off: list[tuple[str, str]] = []
     if OFF_SEARCH_URL_US:
-        urls.append(("openfoodfacts_us", OFF_SEARCH_URL_US))
+        off.append(("openfoodfacts_us", OFF_SEARCH_URL_US))
     if OFF_SEARCH_URL_WORLD:
-        urls.append(("openfoodfacts_world", OFF_SEARCH_URL_WORLD))
-    return urls
+        off.append(("openfoodfacts_world", OFF_SEARCH_URL_WORLD))
+
+    nonfood: list[tuple[str, str]] = []
+    if OPF_SEARCH_URL_WORLD:
+        nonfood.append(("openproductsfacts", OPF_SEARCH_URL_WORLD))
+    if OBF_SEARCH_URL_WORLD:
+        nonfood.append(("openbeautyfacts", OBF_SEARCH_URL_WORLD))
+
+    if cat == "household":
+        return nonfood + off
+
+    return off + nonfood
 
 
 async def _catalog_best_match(
