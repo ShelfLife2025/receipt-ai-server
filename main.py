@@ -389,14 +389,27 @@ def _is_header_or_address(line: str) -> bool:
     s = (line or "").strip()
     if not s:
         return True
+
+    # Phone / ZIP / date / time
     if PHONEISH_RE.search(s):
         return True
     if ZIP_RE.search(s):
         return True
     if DATE_RE.search(s) or TIME_RE.search(s):
         return True
+
+    # City + State (+ optional ZIP) lines
+    if CITY_STATE_LINE_RE.match(s):
+        return True
+
+    # Address meta tokens
+    if ADDR_META_RE.search(s):
+        return True
+
+    # Street-number lines like "1234 W SOME RD"
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
+
     return False
 
 
