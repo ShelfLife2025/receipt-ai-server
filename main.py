@@ -234,7 +234,7 @@ NOISE_PATTERNS = [
     r"\bvisa\b", r"\bmastercard\b", r"\bamex\b", r"\bdiscover\b",
     r"\bauth\b", r"\bapproval\b", r"\bapproved\b",
     r"\border\s*total\b", r"\btotal\s+due\b", r"\bgrand\s+total\b",
-    r"^\s*total\s*$",
+    r"^\s*total\s*$", r"\bshoppe(?:s)?\b",
 
     # store/meta / POS metadata
     r"\bregister\b", r"\breg\b", r"\blane\b", r"\bterminal\b", r"\bterm\b", r"\bpos\b",
