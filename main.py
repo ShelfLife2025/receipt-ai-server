@@ -346,6 +346,18 @@ STORE_WORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# -------------------------------
+# FIX 1: prevent dropping store-brand grocery items.
+# If a line contains a store word AND also contains other meaningful product words,
+# treat it as an item (unless it's basically JUST a store header).
+# -------------------------------
+_STORE_TOKENS = {
+    "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "whole", "foods", "trader", "joe", "joes"
+}
+_GENERIC_HEADER_TOKENS = {
+    "super", "markets", "market", "stores", "store", "wholesale", "pharmacy", "supercenter"
+}
+
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -476,7 +488,9 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     """
     Strong filter to remove store-name/header lines wherever they occur,
     but ONLY when they look like headers (no price/qty hints and short).
-    Prevents "PUBLIX SUPERMARKETS" or "WALMART" lines from leaking as items.
+
+    FIX: Do NOT drop store-brand grocery lines like "Publix Milk" / "Publix Eggs"
+    that contain a store token + additional product tokens.
     """
     if not s:
         return False
@@ -484,6 +498,7 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     if not ss:
         return True
 
+    # If there's any price/qty hint, it is not a header
     if _raw_line_has_price_or_qty_hint(ss):
         return False
 
@@ -491,12 +506,23 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     if not key:
         return True
 
-    # Generic header words + very short
-    if GENERIC_HEADER_WORDS_RE.search(ss) and len(key.split()) <= 8:
+    toks = key.split()
+    if not toks:
         return True
 
-    # Explicit store words + short-ish
-    if STORE_WORDS_RE.search(ss) and len(key.split()) <= 8:
+    # If it contains store words, only treat as header if it is basically ONLY store/header tokens.
+    if STORE_WORDS_RE.search(ss):
+        remaining = [t for t in toks if (t not in _STORE_TOKENS and t not in _GENERIC_HEADER_TOKENS)]
+        # If there are meaningful product tokens left, it's an item line, not a header.
+        if len(remaining) >= 1:
+            return False
+
+        # Otherwise, it is likely a real header line ("publix", "walmart", "publix super markets", etc.)
+        if len(toks) <= 8:
+            return True
+
+    # Generic header words + very short
+    if GENERIC_HEADER_WORDS_RE.search(ss) and len(toks) <= 8:
         return True
 
     return False
@@ -1313,6 +1339,10 @@ def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
     """
     Find totals marker near bottom.
     Avoid cutting off early "Savings Summary" / "Total Savings" blocks.
+
+    FIX 2: choose the LAST plausible totals marker in the tail, not the first.
+    This prevents prematurely truncating the item zone when OCR yields stray "tax/total"
+    lines before the real totals block.
     """
     n = len(raw_lines)
     if n == 0:
@@ -1326,7 +1356,7 @@ def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
             if MONEY_TOKEN_RE.search(ln) or len(dedupe_key(ln).split()) <= 6:
                 candidates.append(idx)
 
-    return candidates[0] if candidates else None
+    return candidates[-1] if candidates else None
 
 
 def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
@@ -1391,6 +1421,23 @@ def _line_has_embedded_price(s: str) -> bool:
     return bool(MONEY_TOKEN_RE.search(s))
 
 
+def _is_descriptionish_line(s: str) -> bool:
+    if not s:
+        return False
+    if _is_header_or_address(s):
+        return False
+    if NOISE_RE.search(s):
+        return False
+    if _is_store_or_header_line_anywhere(s):
+        return False
+    if _is_price_like_line(s) or WEIGHT_ONLY_RE.match(s):
+        return False
+    if _is_weight_or_unit_price_line(s):
+        return False
+    cl = _clean_line(s)
+    return bool(cl) and _has_valid_item_words(cl)
+
+
 def _extract_candidates_from_lines(
     raw_lines: list[str],
     store_hint: str,
@@ -1400,6 +1447,11 @@ def _extract_candidates_from_lines(
     - Always returns ALL item descriptions found in the items zone.
     - Never relies on per-item async tasks; avoids partial returns.
     - Handles produce/weight blocks (desc line -> unit price line -> total price line).
+
+    FIX 3: join wrapped description lines (common OCR split) so we don't miss items.
+    Example patterns:
+      "PUBLIX" + "MILK 1GAL" + "3.99"  -> "PUBLIX MILK 1GAL"
+      "ORGANIC" + "BANANAS" + "@ 0.59/LB" -> "ORGANIC BANANAS"
     """
     dropped_lines: list[dict[str, Any]] = []
 
@@ -1427,17 +1479,21 @@ def _extract_candidates_from_lines(
         pending_clean = None
         pending_qty_hint = 1
 
-    for i in range(zone_start, zone_end):
+    i = zone_start
+    while i < zone_end:
         s = (raw_lines[i] or "").strip()
         if not s:
+            i += 1
             continue
 
         # Store header suppression (only near top; do NOT remove store-brand items later)
         if store_header_pat and store_header_pat.match(s):
             dropped_lines.append({"line": s, "stage": "store_header_exact"})
+            i += 1
             continue
         if _is_probable_store_header_line(s, store_hint=store_hint, position_idx=i - zone_start):
             dropped_lines.append({"line": s, "stage": "store_header_fuzzy"})
+            i += 1
             continue
 
         # Strong store/header suppression anywhere (header-like only)
@@ -1445,17 +1501,20 @@ def _extract_candidates_from_lines(
             if pending_raw:
                 _finalize_pending("hit_store_header_anywhere")
             dropped_lines.append({"line": s, "stage": "store_header_anywhere"})
+            i += 1
             continue
 
         # Noise lines
         if _is_header_or_address(s):
             dropped_lines.append({"line": s, "stage": "header_or_address"})
+            i += 1
             continue
         if NOISE_RE.search(s):
             # If we were waiting on a price line and we hit a noise block, finalize pending anyway.
             if pending_raw:
                 _finalize_pending("hit_noise")
             dropped_lines.append({"line": s, "stage": "noise"})
+            i += 1
             continue
 
         # If this is a unit price / weight line, it belongs to the most recent item description.
@@ -1464,11 +1523,11 @@ def _extract_candidates_from_lines(
             if pending_raw:
                 pending_qty_hint = max(pending_qty_hint, qh)
             elif candidates:
-                # attach to last candidate
                 last = candidates[-1]
                 last.qty_hint = max(int(last.qty_hint), qh)
             else:
                 dropped_lines.append({"line": s, "stage": "orphan_unit_price"})
+            i += 1
             continue
 
         # Pure price-only line: if pending, finalize; otherwise ignore.
@@ -1477,13 +1536,54 @@ def _extract_candidates_from_lines(
                 _finalize_pending("price_line")
             else:
                 dropped_lines.append({"line": s, "stage": "price_only_no_pending"})
+            i += 1
             continue
 
         # At this point, s is "description-ish". Clean it.
         cleaned = _clean_line(s)
         if not cleaned:
             dropped_lines.append({"line": s, "stage": "clean_empty"})
+            i += 1
             continue
+
+        # -------------------------------
+        # FIX 3A: Merge wrapped item lines
+        # If next non-empty line is another description-ish line and one of these is short / brand-like,
+        # merge them into a single description before price/weight lines.
+        # -------------------------------
+        next1, next1_idx = _next_nonempty(raw_lines, i + 1, zone_end)
+        if next1 and _is_descriptionish_line(next1):
+            # Only merge when there is a strong chance it's a continuation, not a separate item.
+            # Heuristic: current is very short OR is store-token-only, and next line looks like a product.
+            key1 = dedupe_key(s)
+            key2 = dedupe_key(next1)
+            toks1 = key1.split()
+            toks2 = key2.split()
+
+            is_store_only = bool(toks1) and all(t in _STORE_TOKENS for t in toks1)
+            short_lead = (len(toks1) <= 2 and len(key1) <= 10) or is_store_only
+
+            # If the line after next1 is price/weight-ish, that further supports "wrapped description"
+            next2, _ = _next_nonempty(raw_lines, next1_idx + 1, zone_end)
+            next2_supports = bool(next2) and (
+                _is_weight_or_unit_price_line(next2) or _is_price_like_line(next2) or WEIGHT_ONLY_RE.match(next2) or _line_has_embedded_price(next1)
+            )
+
+            if short_lead and (len(toks2) >= 1) and next2_supports:
+                combined_raw = f"{s} {next1}".strip()
+                combined_clean = _clean_line(combined_raw)
+                if combined_clean and _has_valid_item_words(combined_clean) and not _is_header_or_address(combined_clean) and not _is_store_or_header_line_anywhere(combined_clean) and not NOISE_RE.search(combined_clean):
+                    s = combined_raw
+                    cleaned = combined_clean
+                    # consume next1
+                    i = next1_idx + 1
+                else:
+                    # no merge
+                    i += 1
+            else:
+                i += 1
+        else:
+            i += 1
 
         # If we have a pending description and we hit another description, finalize previous first.
         if pending_raw:
@@ -1506,17 +1606,17 @@ def _extract_candidates_from_lines(
 
         # Otherwise, decide: pending vs immediate.
         # If the NEXT meaningful line is a unit-price/price-only line, treat this as pending.
-        next1, _ = _next_nonempty(raw_lines, i + 1, zone_end)
-        next2, _ = _next_nonempty(raw_lines, i + 2, zone_end)
+        next1_after, _ = _next_nonempty(raw_lines, i, zone_end)
+        next2_after, _ = _next_nonempty(raw_lines, i + 1, zone_end)
 
-        if next1 and (_is_weight_or_unit_price_line(next1) or _is_price_like_line(next1) or WEIGHT_ONLY_RE.match(next1)):
+        if next1_after and (_is_weight_or_unit_price_line(next1_after) or _is_price_like_line(next1_after) or WEIGHT_ONLY_RE.match(next1_after)):
             pending_raw = s
             pending_clean = cleaned
             pending_qty_hint = 1
             continue
 
         # Some receipts: desc -> unit price -> price (skip one)
-        if next2 and (_is_weight_or_unit_price_line(next2) or _is_price_like_line(next2) or WEIGHT_ONLY_RE.match(next2)):
+        if next2_after and (_is_weight_or_unit_price_line(next2_after) or _is_price_like_line(next2_after) or WEIGHT_ONLY_RE.match(next2_after)):
             pending_raw = s
             pending_clean = cleaned
             pending_qty_hint = 1
