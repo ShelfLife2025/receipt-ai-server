@@ -273,6 +273,13 @@ NOISE_PATTERNS = [
 
     # junk token
     r"\bvov\b",
+
+    # Target loyalty / offers (do not treat as items)
+    r"\btarget\s*circle\b",
+    r"\bcircle\s*(?:offer|deal|rewards?)\b",
+    r"\btarget\s*circle\s*\d+\s*%\b",
+    r"\b\d+\s*%\s*(?:off|discount)\b",
+    r"\b(?:percent|pct)\s*off\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
