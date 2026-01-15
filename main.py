@@ -279,7 +279,8 @@ NOISE_PATTERNS = [
     r"\bcircle\s*(?:offer|deal|rewards?)\b",
     r"\btarget\s*circle\s*\d+\s*%\b",
     r"\b\d+\s*%\s*(?:off|discount)\b",
-    r"\b(?:percent|pct)\s*off\b",
+    r"\b(?:percent|pct)\s*off\b",r"\b(?:target\s*)?circle\s*\d+\b",
+r"\b(?:target\s*)?circle\s*\d+\s*%\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
