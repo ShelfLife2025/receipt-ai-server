@@ -777,7 +777,7 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "pub": "publix",
     "pbl": "publix",
     "pbx": "publix",
-    "gg": "good and gather"
+    "Gg": "good and gather"
     "chees": "cheese",
 
     # common brand/product abbreviations
