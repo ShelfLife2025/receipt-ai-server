@@ -235,6 +235,12 @@ NOISE_PATTERNS = [
     r"\bcircle\b\s*\d+\s*[oO]\b",
     r"\btarget\s*circle\b\s*\d+\s*%?\s*[oO]?\b",
 
+    # FIX: catch OCR where 10 becomes IO / I0 / l0 (common on Target)
+    r"\bcircle\b\s*[iIlL]\s*[oO0]\b",
+    r"\btarget\s*circle\b\s*[iIlL]\s*[oO0]\b",
+    r"\bcircle\b\s*1\s*0\b",
+    r"\btarget\s*circle\b\s*1\s*0\b",
+
     # ---- WALMART / WM SUPERCENTER meta (critical) ----
     r"\bwm\s*supercenter\b",
     r"\bwal\s*mart\s*supercenter\b",
@@ -311,6 +317,67 @@ NOISE_PATTERNS = [
     r"\b(?:target\s*)?circle\s*\d+\s*%\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
+
+# -------------------------------
+# FIX 2: Robust noise detection for OCR-mangled "Target Circle 10"
+# Some OCR variants come through as "Target Circle IO", "Target Circle I0", "Circle lO", etc.
+# We normalize these *only for noise checks* so the line cannot slip through as an item.
+# -------------------------------
+def _noise_normalize(s: str) -> str:
+    ss = (s or "").strip()
+    if not ss:
+        return ""
+    # keep a conservative alnum/space normalization for matching
+    ss = ss.lower()
+
+    # normalize common OCR confusions in numeric contexts
+    # "1O" / "IO" / "lO" / "I0" / "l0" -> "10" when adjacent to digits or when it is a standalone token
+    ss = re.sub(r"(?<=\d)\s*[oO]\s*(?=\d)", "0", ss)
+    ss = re.sub(r"(?<=\d)\s*[iIlL]\s*(?=\d)", "1", ss)
+
+    # standalone token normalizations: "io", "i0", "l0", "1o" -> "10"
+    ss = re.sub(r"\b([iIlL])\s*([oO0])\b", "10", ss)
+
+    ss = re.sub(r"[^a-z0-9\s]+", " ", ss)
+    ss = re.sub(r"\s+", " ", ss).strip()
+    return ss
+
+
+_NOISE_TOKENS_ALLOWED = {
+    "target", "circle", "offer", "deal", "reward", "rewards", "discount", "off", "percent", "pct", "save", "savings"
+}
+_NOISE_IO_TOKEN_RE = re.compile(r"^[iIlL][oO0]$")  # IO / I0 / l0
+
+def _is_noise_line(s: str) -> bool:
+    if not s:
+        return False
+    if NOISE_RE.search(s):
+        return True
+
+    norm = _noise_normalize(s)
+    if norm and NOISE_RE.search(norm):
+        return True
+
+    # heuristic: catch "circle 10" / "target circle 10" even when OCR mangles the 10 token
+    toks = norm.split()
+    if not toks:
+        return False
+
+    if "circle" in toks and ("target" in toks or len(toks) <= 3):
+        other = []
+        for t in toks:
+            if t in _NOISE_TOKENS_ALLOWED:
+                continue
+            if re.fullmatch(r"\d+", t):
+                continue
+            if _NOISE_IO_TOKEN_RE.fullmatch(t):
+                continue
+            other.append(t)
+        if not other:
+            return True
+
+    return False
+
 
 ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
@@ -1347,7 +1414,7 @@ async def enrich_full_name(
 
     learned = _learned_map_lookup(raw_line, expanded_name, store_hint=store_hint)
     if learned:
-        if _is_header_or_address(learned) or _is_store_or_header_line_anywhere(learned) or NOISE_RE.search(learned) or _is_junk_line(learned):
+        if _is_header_or_address(learned) or _is_store_or_header_line_anywhere(learned) or _is_noise_line(learned) or _is_junk_line(learned):
             _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
             return expanded_name, "learned_map_rejected_header", 0.0, ""
         if cache_key:
@@ -1384,7 +1451,7 @@ async def enrich_full_name(
     if hit:
         candidate, score, query_used, source_name = hit
 
-        if _is_header_or_address(candidate) or _is_store_or_header_line_anywhere(candidate) or NOISE_RE.search(candidate) or _is_junk_line(candidate):
+        if _is_header_or_address(candidate) or _is_store_or_header_line_anywhere(candidate) or _is_noise_line(candidate) or _is_junk_line(candidate):
             _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
             if cache_key:
                 _enrich_cache_set(cache_key, expanded_name, f"{source_name}_rejected_header", 0.0)
@@ -1445,7 +1512,7 @@ def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
         s = (raw_lines[i] or "").strip()
         if not s:
             continue
-        if _is_header_or_address(s) or NOISE_RE.search(s) or _is_store_or_header_line_anywhere(s) or _is_junk_line(s):
+        if _is_header_or_address(s) or _is_noise_line(s) or _is_store_or_header_line_anywhere(s) or _is_junk_line(s):
             continue
         if _has_valid_item_words(s) and (_raw_line_has_price_or_qty_hint(s) or len(dedupe_key(s).split()) >= 2):
             start = max(0, i - 3)
@@ -1488,7 +1555,7 @@ def _is_descriptionish_line(s: str) -> bool:
         return False
     if _is_header_or_address(s):
         return False
-    if NOISE_RE.search(s):
+    if _is_noise_line(s):
         return False
     if _is_store_or_header_line_anywhere(s):
         return False
@@ -1520,7 +1587,7 @@ def _extract_candidates_from_lines(
     def _finalize_pending(reason: str) -> None:
         nonlocal pending_raw, pending_clean, pending_qty_hint
         if pending_raw and pending_clean and _has_valid_item_words(pending_clean):
-            if not _is_header_or_address(pending_clean) and not _is_store_or_header_line_anywhere(pending_clean) and not NOISE_RE.search(pending_clean) and not _is_junk_line(pending_clean):
+            if not _is_header_or_address(pending_clean) and not _is_store_or_header_line_anywhere(pending_clean) and not _is_noise_line(pending_clean) and not _is_junk_line(pending_clean):
                 candidates.append(Candidate(raw_line=pending_raw, cleaned_line=pending_clean, qty_hint=max(1, pending_qty_hint)))
             else:
                 dropped_lines.append({"line": pending_raw, "stage": f"pending_drop:{reason}:header_guard", "cleaned": pending_clean})
@@ -1565,7 +1632,7 @@ def _extract_candidates_from_lines(
             dropped_lines.append({"line": s, "stage": "header_or_address"})
             i += 1
             continue
-        if NOISE_RE.search(s):
+        if _is_noise_line(s):
             if pending_raw:
                 _finalize_pending("hit_noise")
             dropped_lines.append({"line": s, "stage": "noise"})
@@ -1616,7 +1683,7 @@ def _extract_candidates_from_lines(
             if short_lead and (len(toks2) >= 1) and next2_supports:
                 combined_raw = f"{s} {next1}".strip()
                 combined_clean = _clean_line(combined_raw)
-                if combined_clean and _has_valid_item_words(combined_clean) and not _is_header_or_address(combined_clean) and not _is_store_or_header_line_anywhere(combined_clean) and not NOISE_RE.search(combined_clean) and not _is_junk_line(combined_clean):
+                if combined_clean and _has_valid_item_words(combined_clean) and not _is_header_or_address(combined_clean) and not _is_store_or_header_line_anywhere(combined_clean) and not _is_noise_line(combined_clean) and not _is_junk_line(combined_clean):
                     s = combined_raw
                     cleaned = combined_clean
                     i = next1_idx + 1
@@ -1634,7 +1701,7 @@ def _extract_candidates_from_lines(
             dropped_lines.append({"line": s, "stage": "no_item_words", "cleaned": cleaned})
             continue
 
-        if _is_header_or_address(cleaned) or _is_store_or_header_line_anywhere(cleaned) or NOISE_RE.search(cleaned) or _is_junk_line(cleaned):
+        if _is_header_or_address(cleaned) or _is_store_or_header_line_anywhere(cleaned) or _is_noise_line(cleaned) or _is_junk_line(cleaned):
             dropped_lines.append({"line": s, "stage": "desc_rejected_header_guard", "cleaned": cleaned})
             continue
 
@@ -1748,7 +1815,7 @@ async def parse_receipt(
             continue
         if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
             continue
-        if NOISE_RE.search(final_name) or _is_header_or_address(final_name) or _is_store_or_header_line_anywhere(final_name) or _is_junk_line(final_name):
+        if _is_noise_line(final_name) or _is_header_or_address(final_name) or _is_store_or_header_line_anywhere(final_name) or _is_junk_line(final_name):
             continue
         if not _has_valid_item_words(final_name):
             continue
@@ -1810,7 +1877,7 @@ async def parse_receipt(
             if (
                 enriched
                 and _has_valid_item_words(enriched)
-                and not NOISE_RE.search(enriched)
+                and not _is_noise_line(enriched)
                 and not _is_header_or_address(enriched)
                 and not _is_store_or_header_line_anywhere(enriched)
                 and not _is_junk_line(enriched)
@@ -1932,7 +1999,7 @@ async def parse_receipt_debug(
             continue
         if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
             continue
-        if NOISE_RE.search(final_name) or _is_header_or_address(final_name) or _is_store_or_header_line_anywhere(final_name) or _is_junk_line(final_name):
+        if _is_noise_line(final_name) or _is_header_or_address(final_name) or _is_store_or_header_line_anywhere(final_name) or _is_junk_line(final_name):
             continue
         if not _has_valid_item_words(final_name):
             continue
