@@ -994,7 +994,7 @@ _PENDING: dict[str, dict[str, Any]] = {}
 _ENRICH_SCORE_STOPWORDS = {
     "the", "and", "or", "of", "a", "an", "with", "for",
     "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
-    "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi",
+    "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "grocery", "groceries",
 }
 
 def _atomic_write_json(path: str, obj: Any) -> None:
