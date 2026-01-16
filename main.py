@@ -777,7 +777,9 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "pub": "publix",
     "pbl": "publix",
     "pbx": "publix",
-    "Gg": "good and gather"
+    "gg": "good and gather",
+    "Gg": "good and gather",
+    "GG": "good and gather",
     "chees": "cheese",
 
     # common brand/product abbreviations
@@ -848,7 +850,6 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "chd": "cheddar",
     "cut": "cut",
 }
-
 PHRASE_MAP: dict[str, str] = {
     "half and half": "half-and-half",
     "h and h": "half-and-half",
