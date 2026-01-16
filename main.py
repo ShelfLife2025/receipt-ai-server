@@ -231,6 +231,9 @@ NOISE_PATTERNS = [
     r"\bbottle\s+deposit\b", r"\bdeposit\s+fee\b", r"\bbottle\s+deposit\s+fee\b",
     r"^\s*o?target\s*$", r"^\s*otarget\s*$", r"^\s*target\.com\s*$",
 
+    # category headers (do not treat as items)
+    r"^\s*grocery\s*$", r"^\s*groceries\s*$",
+
     # totals/tenders
     r"\bsub\s*total\b", r"\bsubtotal\b",
     r"\bamount\s+due\b", r"\bbalance\s+due\b", r"\bchange\s+due\b",
@@ -279,8 +282,8 @@ NOISE_PATTERNS = [
     r"\bcircle\s*(?:offer|deal|rewards?)\b",
     r"\btarget\s*circle\s*\d+\s*%\b",
     r"\b\d+\s*%\s*(?:off|discount)\b",
-    r"\b(?:percent|pct)\s*off\b",r"\b(?:target\s*)?circle\s*\d+\b",
-r"\b(?:target\s*)?circle\s*\d+\s*%\b",
+    r"\b(?:percent|pct)\s*off\b", r"\b(?:target\s*)?circle\s*\d+\b",
+    r"\b(?:target\s*)?circle\s*\d+\s*%\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
@@ -379,6 +382,7 @@ _GENERIC_HEADER_TOKENS = {
 
 _JUNK_EXACT_LINES = {
     "t", "f", "tf", "t f", "ft", "tt", "ff",
+    "grocery", "groceries",
 }
 
 
@@ -781,6 +785,10 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "Gg": "good and gather",
     "GG": "good and gather",
     "chees": "cheese",
+
+    # IMPORTANT: keep Target "RTE" as a token (do NOT expand to multi-word phrase)
+    # This prevents accidental corruption of nearby words (e.g., losing "rice").
+    "rte": "rte",
 
     # common brand/product abbreviations
     "sar": "sargento",
