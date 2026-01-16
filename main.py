@@ -231,6 +231,30 @@ NOISE_PATTERNS = [
     r"\bbottle\s+deposit\b", r"\bdeposit\s+fee\b", r"\bbottle\s+deposit\s+fee\b",
     r"^\s*o?target\s*$", r"^\s*otarget\s*$", r"^\s*target\.com\s*$",
 
+    # FIX: catch OCR where 0 becomes O (e.g., "Target Circle 1O")
+    r"\bcircle\b\s*\d+\s*[oO]\b",
+    r"\btarget\s*circle\b\s*\d+\s*%?\s*[oO]?\b",
+
+    # ---- WALMART / WM SUPERCENTER meta (critical) ----
+    r"\bwm\s*supercenter\b",
+    r"\bwal\s*mart\s*supercenter\b",
+    r"\bwalmart\s*supercenter\b",
+    r"\bwalmart\s*pay\b",
+    r"\bscan\s*&\s*go\b",
+    r"\bspark\b\s*(?:driver|shopper)?\b",
+    r"\breturns?\b\s*(?:policy|center)?\b",
+    r"\bbarcode\b",
+    r"\bmerchant\s+copy\b",
+    r"\bcustomer\s+copy\b",
+    r"\bitem\s*#\b",
+    r"\bdept\b",
+    r"\btc\s*#\b",
+    r"\bst\s*#\b",
+    r"\btr\s*#\b",
+    r"\bcard\s*#\b",
+    r"\bref\s*#\b",
+    r"\baid\b",
+
     # category headers (do not treat as items)
     r"^\s*grocery\s*$", r"^\s*groceries\s*$",
 
@@ -259,6 +283,7 @@ NOISE_PATTERNS = [
 
     # coupons/discounts (hard terms only)
     r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bpromotion\b", r"\byou saved\b", r"\bsavings\b",
+    r"\btotal\s+savings\b", r"\byour\s+savings\b",
 
     # loyalty / points
     r"\bpoints\b", r"\bmember\b", r"\bloyalty\b", r"\bclub\b",
@@ -364,7 +389,7 @@ LONG_NUM_TOKEN_RE = re.compile(r"\b\d{6,14}\b")
 
 # Harder store/header suppression anywhere (must be "header-like": no money/qty hints and short)
 STORE_WORDS_RE = re.compile(
-    r"\b(publix|wal[-\s]*mart|walmart|target|costco|kroger|aldi|whole\s+foods|trader\s+joe'?s)\b",
+    r"\b(publix|wal[-\s]*mart|walmart|target|costco|kroger|aldi|whole\s+foods|trader\s+joe'?s|wm\s*supercenter)\b",
     re.IGNORECASE,
 )
 
@@ -374,7 +399,8 @@ STORE_WORDS_RE = re.compile(
 # treat it as an item (unless it's basically JUST a store header).
 # -------------------------------
 _STORE_TOKENS = {
-    "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "whole", "foods", "trader", "joe", "joes"
+    "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "whole", "foods", "trader", "joe", "joes",
+    "wm",
 }
 _GENERIC_HEADER_TOKENS = {
     "super", "markets", "market", "stores", "store", "wholesale", "pharmacy", "supercenter"
@@ -531,7 +557,7 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     Strong filter to remove store-name/header lines wherever they occur,
     but ONLY when they look like headers (no price/qty hints and short).
 
-    FIX: Do NOT drop store-brand grocery lines like "Publix Milk" / "Publix Eggs"
+    FIX: Do NOT drop store-brand grocery lines like "Walmart Milk" / "Publix Eggs"
     that contain a store token + additional product tokens.
     """
     if not s:
@@ -559,7 +585,7 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
         if len(remaining) >= 1:
             return False
 
-        # Otherwise, it is likely a real header line ("publix", "walmart", "publix super markets", etc.)
+        # Otherwise, it is likely a real header line ("walmart", "wm supercenter", "publix super markets", etc.)
         if len(toks) <= 8:
             return True
 
@@ -717,7 +743,7 @@ def _image_url_for_item(base_url: str, name: str) -> str:
 
 STORE_HINTS: list[tuple[str, re.Pattern]] = [
     ("publix", re.compile(r"\bpublix\b", re.IGNORECASE)),
-    ("walmart", re.compile(r"\bwalmart\b|\bwal[-\s]*mart\b", re.IGNORECASE)),
+    ("walmart", re.compile(r"\bwalmart\b|\bwal[-\s]*mart\b|\bwm\s*supercenter\b", re.IGNORECASE)),
     ("target", re.compile(r"\btarget\b", re.IGNORECASE)),
     ("costco", re.compile(r"\bcostco\b", re.IGNORECASE)),
     ("kroger", re.compile(r"\bkroger\b", re.IGNORECASE)),
@@ -728,7 +754,7 @@ STORE_HINTS: list[tuple[str, re.Pattern]] = [
 
 STORE_HEADER_PATTERNS: dict[str, re.Pattern] = {
     "publix": re.compile(r"^\s*publix(?:\s+super\s*markets?)?\s*$", re.IGNORECASE),
-    "walmart": re.compile(r"^\s*wal[-\s]*mart(?:\s+stores?)?\s*$", re.IGNORECASE),
+    "walmart": re.compile(r"^\s*(?:wm\s*supercenter|wal[-\s]*mart(?:\s+stores?)?|walmart(?:\s+supercenter)?)\s*$", re.IGNORECASE),
     "target": re.compile(r"^\s*o?target\s*$", re.IGNORECASE),
     "costco": re.compile(r"^\s*costco(?:\s+wholesale)?\s*$", re.IGNORECASE),
     "kroger": re.compile(r"^\s*kroger\s*$", re.IGNORECASE),
