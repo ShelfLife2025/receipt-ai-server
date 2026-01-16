@@ -224,6 +224,45 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 # Parsing helpers (noise filters, cleaning, quantity)
 # ============================================================
 
+# -------------------------------
+# WALMART CODE / META KILLER
+# These patterns specifically target the junk that shows up on Walmart receipts:
+# - "Bananas 000000004011ki"  (leading zeros + digits + small suffix)
+# - "Beverage003120002133"    (dept word + long digits)
+# - "Id 7kzgf1sl2ff"          (ID line)
+# - "At 1 for"                (promo fragment)
+# We use this BOTH as:
+#  1) a line-drop filter, and
+#  2) a token-stripper inside item-name lines (prevents Bananas+code).
+# -------------------------------
+WM_CODE_TOKEN_RE = re.compile(
+    r"\b(?:0{4,}\d{3,}[A-Za-z]{0,4}|[A-Za-z]{2,20}\d{6,14}[A-Za-z]{0,4}|\d{7,14}[A-Za-z]{1,4})\b"
+)
+WM_DEPT_CODE_LINE_RE = re.compile(r"^\s*[A-Za-z]{2,24}\s*\d{6,14}\s*$")
+WM_ID_LINE_RE = re.compile(r"^\s*id\s+[a-z0-9]{6,}\s*$", re.IGNORECASE)
+WM_AT_FOR_LINE_RE = re.compile(r"\bat\s+\d+\s+for\b", re.IGNORECASE)
+
+def _is_walmart_code_or_meta_line(s: str) -> bool:
+    if not s:
+        return False
+    ss = (s or "").strip()
+    if not ss:
+        return False
+    if WM_ID_LINE_RE.match(ss):
+        return True
+    if WM_DEPT_CODE_LINE_RE.match(ss):
+        return True
+    if WM_AT_FOR_LINE_RE.search(ss):
+        return True
+    # A line that is basically just the code token(s)
+    key = re.sub(r"[^A-Za-z0-9\s]+", " ", ss)
+    key = re.sub(r"\s+", " ", key).strip()
+    toks = key.split()
+    if toks and all(WM_CODE_TOKEN_RE.fullmatch(t) for t in toks):
+        return True
+    return False
+
+
 NOISE_PATTERNS = [
     # ---- TARGET / big-box promo/meta blocks (critical) ----
     r"\btarget\s*circle\b", r"\bcircle\b\s*\d+", r"\bregular\s+price\b",
@@ -260,6 +299,12 @@ NOISE_PATTERNS = [
     r"\bcard\s*#\b",
     r"\bref\s*#\b",
     r"\baid\b",
+
+    # Walmart internal-code-ish junk (line-level)
+    r"^\s*id\s+[a-z0-9]{6,}\s*$",
+    r"\bat\s+\d+\s+for\b",
+    r"^\s*[A-Za-z]{2,24}\s*\d{6,14}\s*$",
+    r"\b0{4,}\d{3,}[A-Za-z]{0,4}\b",
 
     # category headers (do not treat as items)
     r"^\s*grocery\s*$", r"^\s*groceries\s*$",
@@ -351,6 +396,11 @@ _NOISE_IO_TOKEN_RE = re.compile(r"^[iIlL][oO0]$")  # IO / I0 / l0
 def _is_noise_line(s: str) -> bool:
     if not s:
         return False
+
+    # Walmart codes/meta: kill early
+    if _is_walmart_code_or_meta_line(s):
+        return True
+
     if NOISE_RE.search(s):
         return True
 
@@ -389,7 +439,9 @@ ADDR_SUFFIX_RE = re.compile(
     r"pkwy|parkway|hwy|highway|trl|trail|pl|place|cir|circle|way)\b",
     re.IGNORECASE,
 )
-DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw)\b", re.IGNORECASE)
+
+# FIX: include single-letter directions (N/S/E/W) which are common in addresses: "1155 S Camino Del Rio"
+DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw|n|s|e|w)\b", re.IGNORECASE)
 STATE_ABBR_RE = re.compile(
     r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b",
     re.IGNORECASE,
@@ -550,13 +602,20 @@ def _is_header_or_address(line: str) -> bool:
         return True
 
     # Street-number lines like "1234 W SOME RD"
+    # FIX: direction token now includes N/S/E/W, which catches lines like "1155 S Camino Del Rio"
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
+        return True
+
+    # Additional catch for Spanish-style street names without suffixes (e.g., "Camino", "Avenida")
+    if re.search(r"^\s*\d{2,6}\b", s) and re.search(r"\b(camino|avenida|boulevard|blvd)\b", s, flags=re.IGNORECASE):
         return True
 
     return False
 
 
 def _is_junk_line(s: str) -> bool:
+    if _is_walmart_code_or_meta_line(s):
+        return True
     key = dedupe_key(s)
     if not key:
         return True
@@ -633,6 +692,10 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     if not ss:
         return True
 
+    # Walmart code/meta is always header/noise
+    if _is_walmart_code_or_meta_line(ss):
+        return True
+
     # If there's any price/qty hint, it is not a header
     if _raw_line_has_price_or_qty_hint(ss):
         return False
@@ -667,11 +730,19 @@ def _strip_long_numeric_tokens(s: str) -> str:
     """
     Remove internal ids like Target DPCI / POS codes from names.
     Keeps normal "size" digits like 12pk / 16oz because those are alnum tokens.
+
+    FIX: also remove Walmart-style alphanumeric code tokens:
+      - 000000004011ki
+      - Beverage003120002133
+      - 4011ki (if OCR compresses) only when digits are long (>=7)
     """
     if not s:
         return ""
-    # remove digit-only tokens length 6-14
     s2 = LONG_NUM_TOKEN_RE.sub("", s)
+
+    # remove walmart code tokens anywhere in the line (very strong signal)
+    s2 = WM_CODE_TOKEN_RE.sub("", s2)
+
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2
 
@@ -681,6 +752,8 @@ def _clean_line(line: str) -> str:
     Cleans an OCR line into a candidate item name.
     Removes embedded/trailing prices and flags so we return ONLY the name.
     Also strips big-box internal item codes (e.g., Target DPCI prefixes).
+
+    FIX: strips Walmart internal codes appended to item names (e.g., "Bananas 000000004011ki")
     """
     s = (line or "").strip()
     if not s:
@@ -688,6 +761,10 @@ def _clean_line(line: str) -> str:
 
     # Early discard of obvious junk tokens (prevents "Tf" from surviving later stages)
     if _is_junk_line(s):
+        return ""
+
+    # Drop pure Walmart code/meta lines
+    if _is_walmart_code_or_meta_line(s):
         return ""
 
     # Strip leading price + flags if OCR produced a left-column price.
@@ -717,14 +794,21 @@ def _clean_line(line: str) -> str:
     s = UNIT_PRICE_RE.sub("", s).strip()
     s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
 
+    # Strip Walmart internal code tokens even if OCR put them at end/middle
+    s = WM_CODE_TOKEN_RE.sub("", s).strip()
+
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Remove any remaining internal numeric id tokens anywhere
+    # Remove any remaining internal numeric/alphanumeric id tokens anywhere
     s = _strip_long_numeric_tokens(s)
 
     # Final junk check
     if _is_junk_line(s):
+        return ""
+
+    # If after stripping, the remainder looks like a Walmart code/meta line, drop it
+    if _is_walmart_code_or_meta_line(s):
         return ""
 
     return s
@@ -848,6 +932,10 @@ def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -
     ss = (s or "").strip()
     key = dedupe_key(ss)
     if not key:
+        return False
+
+    # Never treat Walmart code/meta as a store header; it's noise
+    if _is_walmart_code_or_meta_line(ss):
         return False
 
     if store_hint:
@@ -1553,6 +1641,8 @@ def _line_has_embedded_price(s: str) -> bool:
 def _is_descriptionish_line(s: str) -> bool:
     if not s:
         return False
+    if _is_walmart_code_or_meta_line(s):
+        return False
     if _is_header_or_address(s):
         return False
     if _is_noise_line(s):
@@ -1602,6 +1692,14 @@ def _extract_candidates_from_lines(
     while i < zone_end:
         s = (raw_lines[i] or "").strip()
         if not s:
+            i += 1
+            continue
+
+        # Hard kill Walmart code/meta lines early
+        if _is_walmart_code_or_meta_line(s):
+            if pending_raw:
+                _finalize_pending("hit_walmart_code_meta")
+            dropped_lines.append({"line": s, "stage": "walmart_code_meta"})
             i += 1
             continue
 
@@ -1665,8 +1763,10 @@ def _extract_candidates_from_lines(
             i += 1
             continue
 
+        # Join-with-next logic (wrap stitching)
+        # FIX: never join if the next line is Walmart code/meta
         next1, next1_idx = _next_nonempty(raw_lines, i + 1, zone_end)
-        if next1 and _is_descriptionish_line(next1):
+        if next1 and _is_descriptionish_line(next1) and not _is_walmart_code_or_meta_line(next1):
             key1 = dedupe_key(s)
             key2 = dedupe_key(next1)
             toks1 = key1.split()
