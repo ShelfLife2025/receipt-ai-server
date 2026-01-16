@@ -780,8 +780,6 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "gg": "good and gather",
     "Gg": "good and gather",
     "GG": "good and gather",
-    "rte": "ready to eat",
-    "RTE": "ready to eat",
     "chees": "cheese",
 
     # common brand/product abbreviations
