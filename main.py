@@ -661,6 +661,10 @@ def _is_weight_or_unit_price_line(s: str) -> bool:
     if not s:
         return False
     ss = (s or "").strip()
+    
+    if WEIGHT_X_UNIT_PRICE_RE.search(ss):
+        return True
+
     if UNIT_PRICE_RE.search(ss):
         return True
     if PER_UNIT_PRICE_RE.search(ss):
