@@ -459,6 +459,10 @@ ADDR_META_RE = re.compile(r"\b(suite|ste|unit|apt|po\s*box|p\.?\s*o\.?\s*box)\b"
 
 # Allow dot or comma decimals for OCR
 UNIT_PRICE_RE = re.compile(r"\b(\d+)\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
+WEIGHT_X_UNIT_PRICE_RE = re.compile(
+    r"\b\d+(?:[.,]\s*\d+)?\s*(?:lb|lbs|oz|g|kg)\s*[xX]\s*\$?\s*\d+(?:[.,]\s*\d+)?\s*/\s*(?:lb|lbs|oz|g|kg)\b",
+    re.IGNORECASE,
+)
 
 # money tokens show up in item lines AND standalone price lines
 # NOTE: include OCR-mangled decimals where '.' becomes 'o'/'O' (e.g., "3o5", "3o 5")
