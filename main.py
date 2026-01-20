@@ -1627,6 +1627,30 @@ class Candidate(BaseModel):
     cleaned_line: str
     qty_hint: int
 
+def looks_like_item_name(s: str) -> bool:
+    s2 = (s or "").strip()
+    if len(s2) < 3:
+        return False
+
+    low = s2.lower()
+
+    bad = (
+        "subtotal","total","tax","visa","mastercard","amex","cash",
+        "change","balance","tender","refund","payment","store",
+        "auth","trace","acct","circle","savings",
+    )
+    if any(b in low for b in bad):
+        return False
+
+    if not any(c.isalpha() for c in s2):
+        return False
+
+    digits = sum(c.isdigit() for c in s2)
+    if digits >= max(6, len(s2) // 2):
+        return False
+
+    return True
+
 
 def _next_nonempty(raw_lines: list[str], idx: int, zone_end: int) -> Tuple[str, int]:
     j = idx
