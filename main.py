@@ -1709,13 +1709,33 @@ def _extract_candidates_from_lines(
     def _finalize_pending(reason: str) -> None:
         nonlocal pending_raw, pending_clean, pending_qty_hint
         if pending_raw and pending_clean and _has_valid_item_words(pending_clean):
-            if not _is_header_or_address(pending_clean) and not _is_store_or_header_line_anywhere(pending_clean) and not _is_noise_line(pending_clean) and not _is_junk_line(pending_clean):
-                candidates.append(Candidate(raw_line=pending_raw, cleaned_line=pending_clean, qty_hint=max(1, pending_qty_hint)))
+            if (
+                not _is_header_or_address(pending_clean)
+                and not _is_store_or_header_line_anywhere(pending_clean)
+                and not _is_noise_line(pending_clean)
+                and not _is_junk_line(pending_clean)
+            ):
+                candidates.append(
+                    Candidate(
+                        raw_line=pending_raw,
+                        cleaned_line=pending_clean,
+                        qty_hint=max(1, pending_qty_hint),
+                    )
+                )
             else:
-                dropped_lines.append({"line": pending_raw, "stage": f"pending_drop:{reason}:header_guard", "cleaned": pending_clean})
+                dropped_lines.append(
+                    {
+                        "line": pending_raw,
+                        "stage": f"pending_drop:{reason}:header_guard",
+                        "cleaned": pending_clean,
+                    }
+                )
         else:
             if pending_raw:
-                dropped_lines.append({"line": pending_raw, "stage": f"pending_drop:{reason}", "cleaned": pending_clean})
+                dropped_lines.append(
+                    {"line": pending_raw, "stage": f"pending_drop:{reason}", "cleaned": pending_clean}
+                )
+
         pending_raw = None
         pending_clean = None
         pending_qty_hint = 1
@@ -1742,11 +1762,17 @@ def _extract_candidates_from_lines(
             i += 1
             continue
 
+        # IMPORTANT FIX: if we hit store header lines, finalize pending first
         if store_header_pat and store_header_pat.match(s):
+            if pending_raw:
+                _finalize_pending("hit_store_header_exact")
             dropped_lines.append({"line": s, "stage": "store_header_exact"})
             i += 1
             continue
+
         if _is_probable_store_header_line(s, store_hint=store_hint, position_idx=i - zone_start):
+            if pending_raw:
+                _finalize_pending("hit_store_header_fuzzy")
             dropped_lines.append({"line": s, "stage": "store_header_fuzzy"})
             i += 1
             continue
@@ -1758,10 +1784,14 @@ def _extract_candidates_from_lines(
             i += 1
             continue
 
+        # IMPORTANT FIX: if we hit header/address lines, finalize pending first
         if _is_header_or_address(s):
+            if pending_raw:
+                _finalize_pending("hit_header_or_address")
             dropped_lines.append({"line": s, "stage": "header_or_address"})
             i += 1
             continue
+
         if _is_noise_line(s):
             if pending_raw:
                 _finalize_pending("hit_noise")
@@ -1791,6 +1821,9 @@ def _extract_candidates_from_lines(
 
         cleaned = _clean_line(s)
         if not cleaned:
+            # If we cannot clean this line, don't let it "trap" pending forever.
+            # We do NOT finalize pending here automatically because this could be a blank-ish OCR artifact
+            # between item and its price line. Just drop and continue.
             dropped_lines.append({"line": s, "stage": "clean_empty"})
             i += 1
             continue
@@ -1809,13 +1842,23 @@ def _extract_candidates_from_lines(
 
             next2, _ = _next_nonempty(raw_lines, next1_idx + 1, zone_end)
             next2_supports = bool(next2) and (
-                _is_weight_or_unit_price_line(next2) or _is_price_like_line(next2) or WEIGHT_ONLY_RE.match(next2) or _line_has_embedded_price(next1)
+                _is_weight_or_unit_price_line(next2)
+                or _is_price_like_line(next2)
+                or WEIGHT_ONLY_RE.match(next2)
+                or _line_has_embedded_price(next1)
             )
 
             if short_lead and (len(toks2) >= 1) and next2_supports:
                 combined_raw = f"{s} {next1}".strip()
                 combined_clean = _clean_line(combined_raw)
-                if combined_clean and _has_valid_item_words(combined_clean) and not _is_header_or_address(combined_clean) and not _is_store_or_header_line_anywhere(combined_clean) and not _is_noise_line(combined_clean) and not _is_junk_line(combined_clean):
+                if (
+                    combined_clean
+                    and _has_valid_item_words(combined_clean)
+                    and not _is_header_or_address(combined_clean)
+                    and not _is_store_or_header_line_anywhere(combined_clean)
+                    and not _is_noise_line(combined_clean)
+                    and not _is_junk_line(combined_clean)
+                ):
                     s = combined_raw
                     cleaned = combined_clean
                     i = next1_idx + 1
@@ -1826,6 +1869,8 @@ def _extract_candidates_from_lines(
         else:
             i += 1
 
+        # If we had a pending item and we are now seeing a new description-ish line,
+        # finalize the pending one first.
         if pending_raw:
             _finalize_pending("new_desc")
 
@@ -1858,6 +1903,7 @@ def _extract_candidates_from_lines(
 
         candidates.append(Candidate(raw_line=s, cleaned_line=cleaned, qty_hint=1))
 
+    # Final flush at end of zone
     if pending_raw:
         _finalize_pending("zone_end")
 
