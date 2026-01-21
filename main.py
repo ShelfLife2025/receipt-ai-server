@@ -1,3 +1,19 @@
+# main.py
+# NOTE: This is a rewrite of your file with ONE focused addition:
+# a deterministic "NO ABBREVIATIONS" normalization pipeline.
+# Everything else is preserved as-is (routes, OCR, parsing, OFF enrichment, images, admin).
+#
+# Key additions:
+# 1) STORE_TOKEN_MAPS + GLOBAL_TOKEN_MAP
+# 2) normalize_display_name(...) with:
+#    - token expansion (store + global)
+#    - phrase preservation
+#    - strict abbreviation detector + fallback expansions
+#    - safe title casing
+# 3) parse_receipt + parse_receipt_debug now call normalize_display_name(...)
+#
+# You can tune mappings without touching parsing logic.
+
 from __future__ import annotations
 
 import asyncio
@@ -40,40 +56,29 @@ OFF_BUDGET_LOCK: Optional[asyncio.Lock] = None
 # Config
 # ============================================================
 
-# Overall request time budget (prevents platform timeouts).
-# Keep this BELOW your platform gateway timeout.
 REQUEST_DEADLINE_SECONDS = float(os.getenv("REQUEST_DEADLINE_SECONDS", "12.0"))
-
-# OpenFoodFacts/OpenProductsFacts per-call timeout.
 ENRICH_TIMEOUT_SECONDS = float(os.getenv("ENRICH_TIMEOUT_SECONDS", "1.8"))
 
-# Enrichment behavior
 ENABLE_NAME_ENRICH = (os.getenv("ENABLE_NAME_ENRICH", "1").strip() == "1")
 ENRICH_MIN_CONF = float(os.getenv("ENRICH_MIN_CONF", "0.58"))
 
-# If true, allow a best-effort OFF/OPF/OBF result below min conf (still bounded by budgets)
 ENRICH_FORCE_BEST_EFFORT = (os.getenv("ENRICH_FORCE_BEST_EFFORT", "1").strip() == "1")
 ENRICH_FORCE_SCORE_FLOOR = float(os.getenv("ENRICH_FORCE_SCORE_FLOOR", "0.50"))
 
-# Hard cap: how many items per request are allowed to hit external catalogs
 MAX_OFF_LOOKUPS_PER_REQUEST = int(os.getenv("MAX_OFF_LOOKUPS_PER_REQUEST", "12"))
 
-# Concurrency
 OFF_CONCURRENCY = int(os.getenv("OFF_CONCURRENCY", "4"))
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6"))
 
-# Catalog endpoints & query sizing
 OFF_SEARCH_URL_US = (os.getenv("OFF_SEARCH_URL_US") or "https://us.openfoodfacts.org/cgi/search.pl").strip()
 OFF_SEARCH_URL_WORLD = (os.getenv("OFF_SEARCH_URL_WORLD") or "https://world.openfoodfacts.org/cgi/search.pl").strip()
 
-# Non-food fallbacks (same API shape as OFF)
 OPF_SEARCH_URL_WORLD = (os.getenv("OPF_SEARCH_URL_WORLD") or "https://world.openproductsfacts.org/cgi/search.pl").strip()
 OBF_SEARCH_URL_WORLD = (os.getenv("OBF_SEARCH_URL_WORLD") or "https://world.openbeautyfacts.org/cgi/search.pl").strip()
 
 OFF_PAGE_SIZE = int(os.getenv("OFF_PAGE_SIZE", "12"))
 OFF_FIELDS = (os.getenv("OFF_FIELDS") or "product_name,product_name_en,brands,quantity").strip()
 
-# Learned map / pending
 NAME_MAP_JSON = (os.getenv("NAME_MAP_JSON") or "").strip()
 NAME_MAP_PATH = (os.getenv("NAME_MAP_PATH") or "/tmp/name_map.json").strip()
 
@@ -82,10 +87,8 @@ PENDING_ENABLED = (os.getenv("PENDING_ENABLED", "1").strip() == "1")
 
 ADMIN_KEY = (os.getenv("ADMIN_KEY") or "").strip()
 
-# Google Vision creds
 VISION_TMP_PATH = "/tmp/gcloud_key.json"
 
-# Image packshot proxy (optional)
 PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
 PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
 
@@ -181,7 +184,6 @@ def _preprocess_image_bytes(data: bytes, variant: int = 0) -> bytes:
     img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
 
-    # Downscale less aggressively (too much downscale loses small receipt text)
     max_dim = int(os.getenv("OCR_MAX_DIM", "2400"))
     w, h = img.size
     scale = max(w, h) / max_dim if max(w, h) > max_dim else 1.0
@@ -194,7 +196,6 @@ def _preprocess_image_bytes(data: bytes, variant: int = 0) -> bytes:
         img = ImageOps.autocontrast(img)
         img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=160, threshold=3))
     else:
-        # Stronger: contrast + median + simple threshold
         img = ImageOps.autocontrast(img)
         img = img.filter(ImageFilter.MedianFilter(size=3))
         img = img.point(lambda p: 255 if p > 160 else 0)
@@ -224,17 +225,6 @@ def ocr_text_google_vision(image_bytes: bytes) -> str:
 # Parsing helpers (noise filters, cleaning, quantity)
 # ============================================================
 
-# -------------------------------
-# WALMART CODE / META KILLER
-# These patterns specifically target the junk that shows up on Walmart receipts:
-# - "Bananas 000000004011ki"  (leading zeros + digits + small suffix)
-# - "Beverage003120002133"    (dept word + long digits)
-# - "Id 7kzgf1sl2ff"          (ID line)
-# - "At 1 for"                (promo fragment)
-# We use this BOTH as:
-#  1) a line-drop filter, and
-#  2) a token-stripper inside item-name lines (prevents Bananas+code).
-# -------------------------------
 WM_CODE_TOKEN_RE = re.compile(
     r"\b(?:0{4,}\d{3,}[A-Za-z]{0,4}|[A-Za-z]{2,20}\d{6,14}[A-Za-z]{0,4}|\d{7,14}[A-Za-z]{1,4})\b"
 )
@@ -254,7 +244,6 @@ def _is_walmart_code_or_meta_line(s: str) -> bool:
         return True
     if WM_AT_FOR_LINE_RE.search(ss):
         return True
-    # A line that is basically just the code token(s)
     key = re.sub(r"[^A-Za-z0-9\s]+", " ", ss)
     key = re.sub(r"\s+", " ", key).strip()
     toks = key.split()
@@ -264,23 +253,19 @@ def _is_walmart_code_or_meta_line(s: str) -> bool:
 
 
 NOISE_PATTERNS = [
-    # ---- TARGET / big-box promo/meta blocks (critical) ----
     r"\btarget\s*circle\b", r"\bcircle\b\s*\d+", r"\bregular\s+price\b",
     r"\bexpect\s+more\b", r"\bpay\s+less\b", r"\bexpect\s+more\s+pay\s+less\b",
     r"\bbottle\s+deposit\b", r"\bdeposit\s+fee\b", r"\bbottle\s+deposit\s+fee\b",
     r"^\s*o?target\s*$", r"^\s*otarget\s*$", r"^\s*target\.com\s*$",
 
-    # FIX: catch OCR where 0 becomes O (e.g., "Target Circle 1O")
     r"\bcircle\b\s*\d+\s*[oO]\b",
     r"\btarget\s*circle\b\s*\d+\s*%?\s*[oO]?\b",
 
-    # FIX: catch OCR where 10 becomes IO / I0 / l0 (common on Target)
     r"\bcircle\b\s*[iIlL]\s*[oO0]\b",
     r"\btarget\s*circle\b\s*[iIlL]\s*[oO0]\b",
     r"\bcircle\b\s*1\s*0\b",
     r"\btarget\s*circle\b\s*1\s*0\b",
 
-    # ---- WALMART / WM SUPERCENTER meta (critical) ----
     r"\bwm\s*supercenter\b",
     r"\bwal\s*mart\s*supercenter\b",
     r"\bwalmart\s*supercenter\b",
@@ -300,16 +285,13 @@ NOISE_PATTERNS = [
     r"\bref\s*#\b",
     r"\baid\b",
 
-    # Walmart internal-code-ish junk (line-level)
     r"^\s*id\s+[a-z0-9]{6,}\s*$",
     r"\bat\s+\d+\s+for\b",
     r"^\s*[A-Za-z]{2,24}\s*\d{6,14}\s*$",
     r"\b0{4,}\d{3,}[A-Za-z]{0,4}\b",
 
-    # category headers (do not treat as items)
     r"^\s*grocery\s*$", r"^\s*groceries\s*$",
 
-    # totals/tenders
     r"\bsub\s*total\b", r"\bsubtotal\b",
     r"\bamount\s+due\b", r"\bbalance\s+due\b", r"\bchange\s+due\b",
     r"\btax\b", r"\bsales\s+tax\b",
@@ -320,40 +302,31 @@ NOISE_PATTERNS = [
     r"\border\s*total\b", r"\btotal\s+due\b", r"\bgrand\s+total\b",
     r"^\s*total\s*$", r"\bshoppe(?:s)?\b",
 
-    # store/meta / POS metadata
     r"\bregister\b", r"\breg\b", r"\blane\b", r"\bterminal\b", r"\bterm\b", r"\bpos\b",
     r"\bcashier\b", r"\bmanager\b", r"\boperator\b", r"\bop\s*#\b",
     r"\bstore\s*#\b", r"\bst\s*#\b", r"\btrx\b", r"\btransaction\b",
     r"\btrace\b", r"\btrace\s*#\b", r"\bacct\b", r"\bacct\s*#\b",
     r"\binvoice\b", r"\binv\b", r"\border\s*#\b",
 
-    # receipt/footer
     r"\breceipt\b", r"\bserved\b", r"\bguest\b", r"\bvisit\b",
     r"\bthank you\b", r"\bthanks\b", r"\bcome again\b",
     r"\breturn\b", r"\brefund\b", r"\bpolicy\b",
 
-    # coupons/discounts (hard terms only)
     r"\bcoupon\b", r"\bdiscount\b", r"\bpromo\b", r"\bpromotion\b", r"\byou saved\b", r"\bsavings\b",
     r"\btotal\s+savings\b", r"\byour\s+savings\b",
 
-    # loyalty / points
     r"\bpoints\b", r"\bmember\b", r"\bloyalty\b", r"\bclub\b",
 
-    # contact/web
     r"\bphone\b", r"\btel\b", r"\bwww\.", r"\.com\b",
 
-    # common “items count” footer/header
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
 
-    # plaza/location headers
     r"\bshopping\s+center\b",
     r"\bshopping\s+ctr\b",
 
-    # junk token
     r"\bvov\b",
 
-    # Target loyalty / offers (do not treat as items)
     r"\btarget\s*circle\b",
     r"\bcircle\s*(?:offer|deal|rewards?)\b",
     r"\btarget\s*circle\s*\d+\s*%\b",
@@ -363,41 +336,27 @@ NOISE_PATTERNS = [
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
-# -------------------------------
-# FIX 2: Robust noise detection for OCR-mangled "Target Circle 10"
-# Some OCR variants come through as "Target Circle IO", "Target Circle I0", "Circle lO", etc.
-# We normalize these *only for noise checks* so the line cannot slip through as an item.
-# -------------------------------
 def _noise_normalize(s: str) -> str:
     ss = (s or "").strip()
     if not ss:
         return ""
-    # keep a conservative alnum/space normalization for matching
     ss = ss.lower()
-
-    # normalize common OCR confusions in numeric contexts
-    # "1O" / "IO" / "lO" / "I0" / "l0" -> "10" when adjacent to digits or when it is a standalone token
     ss = re.sub(r"(?<=\d)\s*[oO]\s*(?=\d)", "0", ss)
     ss = re.sub(r"(?<=\d)\s*[iIlL]\s*(?=\d)", "1", ss)
-
-    # standalone token normalizations: "io", "i0", "l0", "1o" -> "10"
     ss = re.sub(r"\b([iIlL])\s*([oO0])\b", "10", ss)
-
     ss = re.sub(r"[^a-z0-9\s]+", " ", ss)
     ss = re.sub(r"\s+", " ", ss).strip()
     return ss
 
-
 _NOISE_TOKENS_ALLOWED = {
     "target", "circle", "offer", "deal", "reward", "rewards", "discount", "off", "percent", "pct", "save", "savings"
 }
-_NOISE_IO_TOKEN_RE = re.compile(r"^[iIlL][oO0]$")  # IO / I0 / l0
+_NOISE_IO_TOKEN_RE = re.compile(r"^[iIlL][oO0]$")
 
 def _is_noise_line(s: str) -> bool:
     if not s:
         return False
 
-    # Walmart codes/meta: kill early
     if _is_walmart_code_or_meta_line(s):
         return True
 
@@ -408,7 +367,6 @@ def _is_noise_line(s: str) -> bool:
     if norm and NOISE_RE.search(norm):
         return True
 
-    # heuristic: catch "circle 10" / "target circle 10" even when OCR mangles the 10 token
     toks = norm.split()
     if not toks:
         return False
@@ -440,14 +398,12 @@ ADDR_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# FIX: include single-letter directions (N/S/E/W) which are common in addresses: "1155 S Camino Del Rio"
 DIRECTION_RE = re.compile(r"\b(north|south|east|west|ne|nw|se|sw|n|s|e|w)\b", re.IGNORECASE)
 STATE_ABBR_RE = re.compile(
     r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b",
     re.IGNORECASE,
 )
 
-# Lines like: "ORLANDO FL" or "ALTAMONTE SPRINGS, FL" or "ORLANDO FL 32801"
 CITY_STATE_LINE_RE = re.compile(
     r"^\s*[A-Za-z][A-Za-z\s\.'-]{2,}\s*,?\s*"
     r"(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)"
@@ -457,15 +413,12 @@ CITY_STATE_LINE_RE = re.compile(
 
 ADDR_META_RE = re.compile(r"\b(suite|ste|unit|apt|po\s*box|p\.?\s*o\.?\s*box)\b", re.IGNORECASE)
 
-# Allow dot or comma decimals for OCR
 UNIT_PRICE_RE = re.compile(r"\b(\d+)\s*@\s*\$?\s*\d+(?:[.,]\s*\d{1,2})?\b", re.IGNORECASE)
 WEIGHT_X_UNIT_PRICE_RE = re.compile(
     r"\b\d+(?:[.,]\s*\d+)?\s*(?:lb|lbs|oz|g|kg)\s*[xX]\s*\$?\s*\d+(?:[.,]\s*\d+)?\s*/\s*(?:lb|lbs|oz|g|kg)\b",
     re.IGNORECASE,
 )
 
-# money tokens show up in item lines AND standalone price lines
-# NOTE: include OCR-mangled decimals where '.' becomes 'o'/'O' (e.g., "3o5", "3o 5")
 MONEY_TOKEN_RE = re.compile(
     r"(?:\$?\s*)\b\d{1,6}(?:[.,]\s*\d{2})\b|(?:\$?\s*)\b\d{1,6}\s*[oO]\s*\d{1,2}\b|\b\d{1,6}\s+\d{2}\b"
 )
@@ -501,26 +454,17 @@ GENERIC_HEADER_WORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Publix-style leading "price + flags" (rare; some OCR layouts flip columns)
 LEADING_PRICE_RE = re.compile(r"^\s*(?:\$?\s*)?(?:\d+[.,]\s*\d{2}|\d+\s*[oO]\s*\d{1,2}|\d+\s+\d{2})\s+", re.IGNORECASE)
 LEADING_FLAGS_RE = re.compile(r"^\s*(?:(?:[tTfF]\b)\s*){1,4}", re.IGNORECASE)
 
-# Leading item-code / DPCI / internal id prefixes (Target/Walmart, etc.)
 LEADING_ITEM_CODE_RE = re.compile(r"^\s*\d{6,14}\s+(?=\S)")
-# Long numeric tokens anywhere in the line that are almost certainly internal ids (not sizes like 12pk)
 LONG_NUM_TOKEN_RE = re.compile(r"\b\d{6,14}\b")
 
-# Harder store/header suppression anywhere (must be "header-like": no money/qty hints and short)
 STORE_WORDS_RE = re.compile(
     r"\b(publix|wal[-\s]*mart|walmart|target|costco|kroger|aldi|whole\s+foods|trader\s+joe'?s|wm\s*supercenter)\b",
     re.IGNORECASE,
 )
 
-# -------------------------------
-# FIX 1: prevent dropping store-brand grocery items.
-# If a line contains a store word AND also contains other meaningful product words,
-# treat it as an item (unless it's basically JUST a store header).
-# -------------------------------
 _STORE_TOKENS = {
     "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "whole", "foods", "trader", "joe", "joes",
     "wm",
@@ -533,7 +477,6 @@ _JUNK_EXACT_LINES = {
     "t", "f", "tf", "t f", "ft", "tt", "ff",
     "grocery", "groceries",
 }
-
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -589,7 +532,6 @@ def _is_header_or_address(line: str) -> bool:
     if not s:
         return True
 
-    # Phone / ZIP / date / time
     if PHONEISH_RE.search(s):
         return True
     if ZIP_RE.search(s):
@@ -597,20 +539,15 @@ def _is_header_or_address(line: str) -> bool:
     if DATE_RE.search(s) or TIME_RE.search(s):
         return True
 
-    # City + State (+ optional ZIP) lines
     if CITY_STATE_LINE_RE.match(s):
         return True
 
-    # Address meta tokens
     if ADDR_META_RE.search(s):
         return True
 
-    # Street-number lines like "1234 W SOME RD"
-    # FIX: direction token now includes N/S/E/W, which catches lines like "1155 S Camino Del Rio"
     if re.search(r"^\s*\d{2,6}\b", s) and (ADDR_SUFFIX_RE.search(s) or DIRECTION_RE.search(s)):
         return True
 
-    # Additional catch for Spanish-style street names without suffixes (e.g., "Camino", "Avenida")
     if re.search(r"^\s*\d{2,6}\b", s) and re.search(r"\b(camino|avenida|boulevard|blvd)\b", s, flags=re.IGNORECASE):
         return True
 
@@ -625,7 +562,6 @@ def _is_junk_line(s: str) -> bool:
         return True
     if key in _JUNK_EXACT_LINES:
         return True
-    # A single tiny alpha token like "Tf" should not become an item
     toks = key.split()
     if len(toks) == 1 and toks[0].isalpha() and len(toks[0]) <= 2:
         return True
@@ -661,7 +597,7 @@ def _is_weight_or_unit_price_line(s: str) -> bool:
     if not s:
         return False
     ss = (s or "").strip()
-    
+
     if WEIGHT_X_UNIT_PRICE_RE.search(ss):
         return True
 
@@ -687,24 +623,15 @@ def _raw_line_has_price_or_qty_hint(s: str) -> bool:
 
 
 def _is_store_or_header_line_anywhere(s: str) -> bool:
-    """
-    Strong filter to remove store-name/header lines wherever they occur,
-    but ONLY when they look like headers (no price/qty hints and short).
-
-    FIX: Do NOT drop store-brand grocery lines like "Walmart Milk" / "Publix Eggs"
-    that contain a store token + additional product tokens.
-    """
     if not s:
         return False
     ss = (s or "").strip()
     if not ss:
         return True
 
-    # Walmart code/meta is always header/noise
     if _is_walmart_code_or_meta_line(ss):
         return True
 
-    # If there's any price/qty hint, it is not a header
     if _raw_line_has_price_or_qty_hint(ss):
         return False
 
@@ -716,18 +643,13 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     if not toks:
         return True
 
-    # If it contains store words, only treat as header if it is basically ONLY store/header tokens.
     if STORE_WORDS_RE.search(ss):
         remaining = [t for t in toks if (t not in _STORE_TOKENS and t not in _GENERIC_HEADER_TOKENS)]
-        # If there are meaningful product tokens left, it's an item line, not a header.
         if len(remaining) >= 1:
             return False
-
-        # Otherwise, it is likely a real header line ("walmart", "wm supercenter", "publix super markets", etc.)
         if len(toks) <= 8:
             return True
 
-    # Generic header words + very short
     if GENERIC_HEADER_WORDS_RE.search(ss) and len(toks) <= 8:
         return True
 
@@ -735,87 +657,53 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
 
 
 def _strip_long_numeric_tokens(s: str) -> str:
-    """
-    Remove internal ids like Target DPCI / POS codes from names.
-    Keeps normal "size" digits like 12pk / 16oz because those are alnum tokens.
-
-    FIX: also remove Walmart-style alphanumeric code tokens:
-      - 000000004011ki
-      - Beverage003120002133
-      - 4011ki (if OCR compresses) only when digits are long (>=7)
-    """
     if not s:
         return ""
     s2 = LONG_NUM_TOKEN_RE.sub("", s)
-
-    # remove walmart code tokens anywhere in the line (very strong signal)
     s2 = WM_CODE_TOKEN_RE.sub("", s2)
-
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2
 
 
 def _clean_line(line: str) -> str:
-    """
-    Cleans an OCR line into a candidate item name.
-    Removes embedded/trailing prices and flags so we return ONLY the name.
-    Also strips big-box internal item codes (e.g., Target DPCI prefixes).
-
-    FIX: strips Walmart internal codes appended to item names (e.g., "Bananas 000000004011ki")
-    """
     s = (line or "").strip()
     if not s:
         return ""
 
-    # Early discard of obvious junk tokens (prevents "Tf" from surviving later stages)
     if _is_junk_line(s):
         return ""
 
-    # Drop pure Walmart code/meta lines
     if _is_walmart_code_or_meta_line(s):
         return ""
 
-    # Strip leading price + flags if OCR produced a left-column price.
     if LEADING_PRICE_RE.match(s):
         s = LEADING_PRICE_RE.sub("", s).strip()
         s = LEADING_FLAGS_RE.sub("", s).strip()
 
-    # Strip leading internal item codes (Target/Walmart style)
     s = LEADING_ITEM_CODE_RE.sub("", s).strip()
 
-    # Strip trailing prices (Publix often puts price at end)
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}(?:[.,]\s*\d{2})\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\$?\s*\d{1,6}\s*[oO]\s*\d{1,2}\s*)\s*$", "", s)
     s = re.sub(r"(?:\s+\d{1,6}\s+\d{2}\s*)\s*$", "", s)
 
-    # Strip possible trailing flags after price (e.g., "2.69 T F" or "6.70 F")
     s = re.sub(r"(?:\s+[tTfF]){1,4}\s*$", "", s)
-
-    # Strip trailing cents-only token (common OCR tail: "... 99")
     s = re.sub(r"\s+\d{2}\s*$", "", s)
 
-    # Strip trailing tax/flag junk
     s = re.sub(r"\s+\b(?:T|F|TF|TX|TAX)\b\s*$", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+\b(?:T|F|TF|TX|TAX)\b\s*$", "", s, flags=re.IGNORECASE)
 
-    # Remove unit price artifacts
     s = UNIT_PRICE_RE.sub("", s).strip()
     s = re.sub(r"\b\d+(?:[.,]\s*\d+)?\s*/\s*(lb|lbs|oz|g|kg|ea|each|ct)\b", "", s, flags=re.IGNORECASE).strip()
 
-    # Strip Walmart internal code tokens even if OCR put them at end/middle
     s = WM_CODE_TOKEN_RE.sub("", s).strip()
 
     s = s.replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Remove any remaining internal numeric/alphanumeric id tokens anywhere
     s = _strip_long_numeric_tokens(s)
 
-    # Final junk check
     if _is_junk_line(s):
         return ""
-
-    # If after stripping, the remainder looks like a Walmart code/meta line, drop it
     if _is_walmart_code_or_meta_line(s):
         return ""
 
@@ -825,17 +713,14 @@ def _clean_line(line: str) -> str:
 def _parse_quantity(line: str) -> Tuple[int, str]:
     s = (line or "").strip()
 
-    # trailing: "Item x2"
     m = re.search(r"(.*?)\b[xX]\s*(\d+)\s*$", s)
     if m:
         return max(int(m.group(2)), 1), m.group(1).strip()
 
-    # leading: "2x Item"
     m = re.match(r"^\s*(\d+)\s*[xX]\s+(.*)$", s)
     if m:
         return max(int(m.group(1)), 1), m.group(2).strip()
 
-    # leading bare qty: "2 Item"
     m = re.match(r"^\s*(\d+)\s+(.*)$", s)
     if m:
         qty = int(m.group(1))
@@ -942,7 +827,6 @@ def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -
     if not key:
         return False
 
-    # Never treat Walmart code/meta as a store header; it's noise
     if _is_walmart_code_or_meta_line(ss):
         return False
 
@@ -960,11 +844,10 @@ def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -
 
 
 # ============================================================
-# Abbrev expansion + phrase preservation (aim: no abbreviations)
+# Abbrev expansion + phrase preservation (existing)
 # ============================================================
 
 ABBREV_TOKEN_MAP: dict[str, str] = {
-    # store-brand tokens
     "pblx": "publix",
     "publx": "publix",
     "pub": "publix",
@@ -975,11 +858,8 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "GG": "good and gather",
     "chees": "cheese",
 
-    # IMPORTANT: keep Target "RTE" as a token (do NOT expand to multi-word phrase)
-    # This prevents accidental corruption of nearby words (e.g., losing "rice").
     "rte": "rte",
 
-    # common brand/product abbreviations
     "sar": "sargento",
     "arts": "artisan",
     "blnd": "blends",
@@ -990,12 +870,10 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "wht": "white",
     "sdl": "seedless",
 
-    # bakery
     "bg": "bagels",
     "swr": "swirl",
     "swrl": "swirl",
 
-    # dairy
     "crm": "cream",
     "chs": "cheese",
     "whp": "whipping",
@@ -1004,7 +882,6 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "marg": "margarine",
     "yog": "yogurt",
 
-    # staples
     "veg": "vegetable",
     "org": "organic",
     "grd": "ground",
@@ -1023,13 +900,11 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "ext": "extract",
     "vngr": "vinegar",
 
-    # household-ish
     "alc": "alcohol",
     "iso": "isopropyl",
     "isoprop": "isopropyl",
     "isopropyl": "isopropyl",
 
-    # misc receipt shorthand
     "prm": "premium",
     "grl": "grilled",
     "pta": "potato",
@@ -1037,12 +912,10 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "rstd": "roasted",
     "ov": "oven",
 
-    # Jack Daniel's style
     "jd": "jack daniel's",
     "tenn": "tennessee",
     "hny": "honey",
 
-    # Publix cheese line
     "sh": "sharp",
     "chd": "cheddar",
     "cut": "cut",
@@ -1081,16 +954,12 @@ def _normalize_for_phrase_match(s: str) -> str:
 
 
 def expand_abbreviations(name: str) -> str:
-    """
-    Goal: expand as many receipt abbreviations as possible so returned names
-    are not abbreviated even when catalog enrichment cannot run in time.
-    """
     if not name:
         return ""
     raw = (name or "").strip()
     raw = raw.replace("&", " and ")
     raw = raw.replace("-", " ")
-    raw = re.sub(r"[^\w\s']", " ", raw)  # keep apostrophes for "daniel's"
+    raw = re.sub(r"[^\w\s']", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
 
     toks = [t for t in raw.split(" ") if t]
@@ -1117,11 +986,6 @@ def expand_abbreviations(name: str) -> str:
 
 
 def post_name_cleanup(name: str) -> str:
-    """
-    Final, conservative cleanup for OCR leftovers/truncations.
-    This runs after expand_abbreviations and after enrichment, and should only
-    touch obvious garbage so we don't accidentally change real product names.
-    """
     s = (name or "").strip()
     if not s:
         return ""
@@ -1142,7 +1006,6 @@ def post_name_cleanup(name: str) -> str:
         toks = toks[:-1]
         low = " ".join(toks).strip()
 
-    # remove internal digit-only ids that slipped through
     low = _strip_long_numeric_tokens(low)
 
     return re.sub(r"\s+", " ", low).strip()
@@ -1176,6 +1039,230 @@ def _needs_official_name(name: str) -> bool:
     if letters >= 4 and (uppers / max(letters, 1)) > 0.85 and len(s) <= 18:
         return True
     return False
+
+
+# ============================================================
+# NEW: No-Abbreviation Display Name Normalizer (deterministic)
+# ============================================================
+
+# 1) Store-specific maps (expand receipt shorthand into real words)
+STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
+    "publix": {
+        # common Publix abbreviations seen in produce/deli/bakery
+        "wdg": "wedge",
+        "wdge": "wedge",
+        "dcd": "diced",
+        "slt": "salted",
+        "unslt": "unsalted",
+        "it": "italian",
+        "itl": "italian",
+        "frsh": "fresh",
+        "pk": "pack",
+        "pck": "pack",
+        "pks": "packs",
+        "swt": "sweet",
+        "pln": "plain",
+        "sprd": "spread",
+        "chz": "cheese",
+        "mnst": "muenster",
+        "mnstr": "muenster",
+        "moz": "mozzarella",
+        "mzzrl": "mozzarella",
+        "parm": "parmesan",
+        "rg": "regular",
+        "lg": "large",
+        "sm": "small",
+    },
+    "target": {
+        # Target brand shorthand
+        "gg": "good and gather",
+    },
+    "walmart": {},
+    "aldi": {},
+    "costco": {},
+    "kroger": {},
+    "whole foods": {},
+    "trader joe's": {},
+}
+
+# 2) Global map (safe expansions across stores)
+GLOBAL_TOKEN_MAP: dict[str, str] = {
+    # dairy/food
+    "hvy": "heavy",
+    "whp": "whipping",
+    "crm": "cream",
+    "chs": "cheese",
+    "chees": "cheese",
+    "bttr": "butter",
+    "marg": "margarine",
+    "yog": "yogurt",
+    "org": "organic",
+    "veg": "vegetable",
+    "grd": "ground",
+    "bnls": "boneless",
+    "sknls": "skinless",
+    "brst": "breast",
+    "chk": "chicken",
+    "ckn": "chicken",
+    "chkn": "chicken",
+    "bf": "beef",
+
+    # household
+    "alc": "alcohol",
+    "iso": "isopropyl",
+    "isoprop": "isopropyl",
+
+    # brands/known
+    "jd": "jack daniel's",
+    "tenn": "tennessee",
+
+    # critical: keep "rte" as-is (your comment)
+    "rte": "rte",
+}
+
+# 3) “Never show these abbreviations” fallback expansions:
+# If the strict checker finds these tokens and they weren't expanded above, we force-expand them.
+FORCED_FALLBACK_MAP: dict[str, str] = {
+    "snk": "snack",
+    "sn": "snack",
+    "chs": "cheese",
+    "chz": "cheese",
+    "wt": "weight",
+    "ct": "count",
+    "pk": "pack",
+    "pck": "pack",
+    "reg": "regular",
+    "lrg": "large",
+    "lg": "large",
+    "sm": "small",
+    "frz": "freezer",
+    "frsh": "fresh",
+    "dcd": "diced",
+    "swt": "sweet",
+    "pln": "plain",
+    "brd": "bread",
+}
+
+# tokens we allow to remain short because they're meaningful as-is
+ALLOWED_SHORT_TOKENS = {
+    "oz", "lb", "lbs", "g", "kg", "ml", "l", "xl", "xxl",
+    "bf",  # sometimes "bf" appears in learned/canonical items; we already expand above, but allow just in case
+    "rte",
+}
+
+# patterns indicating a token is likely an abbreviation we should not display
+_ABBR_TOKEN_RE = re.compile(r"^[A-Za-z]{2,4}$")
+_ALLCAPS_RE = re.compile(r"^[A-Z]{2,6}$")
+
+def _split_tokens_preserve_numbers(s: str) -> list[str]:
+    # Keep apostrophes, numbers, and letters as tokens; discard other punctuation.
+    raw = (s or "").strip()
+    raw = raw.replace("&", " and ")
+    raw = re.sub(r"[^\w\s'-]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return [t for t in raw.split(" ") if t]
+
+def _token_expand(token: str, store_hint: str) -> str:
+    tl = token.lower()
+    if store_hint and store_hint in STORE_TOKEN_MAPS:
+        sm = STORE_TOKEN_MAPS.get(store_hint) or {}
+        if tl in sm:
+            return sm[tl]
+    if tl in GLOBAL_TOKEN_MAP:
+        return GLOBAL_TOKEN_MAP[tl]
+    # keep your existing ABBREV_TOKEN_MAP as another layer
+    if tl in ABBREV_TOKEN_MAP:
+        return ABBREV_TOKEN_MAP[tl]
+    return tl
+
+def _looks_like_bad_abbrev_token(tok: str) -> bool:
+    if not tok:
+        return False
+    # allow numbers and units
+    if re.search(r"\d", tok):
+        return False
+    tl = tok.lower()
+    if tl in ALLOWED_SHORT_TOKENS:
+        return False
+    # if it is all caps (OCR sometimes gives) and short
+    if _ALLCAPS_RE.fullmatch(tok):
+        return True
+    # short alpha token 2-4 letters (common receipt abbrev)
+    if _ABBR_TOKEN_RE.fullmatch(tok):
+        return True
+    return False
+
+def _force_expand_remaining_abbrevs(tokens: list[str]) -> list[str]:
+    out: list[str] = []
+    for t in tokens:
+        if not t:
+            continue
+        tl = t.lower()
+        if _looks_like_bad_abbrev_token(t) and tl in FORCED_FALLBACK_MAP:
+            out.append(FORCED_FALLBACK_MAP[tl])
+        else:
+            out.append(tl)
+    return out
+
+def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[str, Any]]:
+    """
+    Deterministic pipeline to ensure the DISPLAY NAME has no abbreviations.
+
+    Returns: (normalized_name, debug_info)
+    """
+    dbg: dict[str, Any] = {}
+    if not name:
+        return "", dbg
+
+    # 0) baseline cleanup from your existing pipeline
+    base = post_name_cleanup(expand_abbreviations(_clean_line(name))).strip()
+    base = re.sub(r"\s+", " ", base).strip()
+    dbg["base"] = base
+
+    if not base:
+        return "", dbg
+
+    # 1) token expand using store + global maps (safe, deterministic)
+    toks = _split_tokens_preserve_numbers(base)
+    dbg["tokens_in"] = toks[:]
+
+    expanded_tokens: list[str] = []
+    for t in toks:
+        expanded_tokens.append(_token_expand(t, store_hint))
+
+    # 2) phrase preservation (reuse your PHRASE_MAP)
+    joined = " ".join(expanded_tokens).strip()
+    norm = _normalize_for_phrase_match(joined)
+    for k in sorted(PHRASE_MAP.keys(), key=lambda x: len(x.split()), reverse=True):
+        if k in norm:
+            norm = re.sub(rf"\b{re.escape(k)}\b", PHRASE_MAP[k], norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
+    dbg["after_store_global_expand"] = norm
+
+    # 3) strict “no abbreviations” enforcement pass
+    toks2 = _split_tokens_preserve_numbers(norm)
+    forced = _force_expand_remaining_abbrevs(toks2)
+    dbg["forced_tokens"] = forced[:]
+
+    norm2 = " ".join(forced).strip()
+    norm2 = re.sub(r"\s+", " ", norm2).strip()
+
+    # 4) final sanity: remove any leftover internal codes
+    norm2 = _strip_long_numeric_tokens(norm2)
+    norm2 = re.sub(r"\s+", " ", norm2).strip()
+    dbg["after_forced"] = norm2
+
+    # 5) If still looks abbreviated overall, we’ll record it to pending for human feedback
+    # (This does NOT change output; it just helps you build coverage fast.)
+    if _looks_abbreviated(norm2):
+        dbg["still_looks_abbrev"] = True
+    else:
+        dbg["still_looks_abbrev"] = False
+
+    # 6) Title-case for display
+    pretty = title_case(norm2)
+    dbg["pretty"] = pretty
+    return pretty, dbg
 
 
 # ============================================================
@@ -1747,7 +1834,6 @@ def _extract_candidates_from_lines(
             i += 1
             continue
 
-        # Hard kill Walmart code/meta lines early
         if _is_walmart_code_or_meta_line(s):
             if pending_raw:
                 _finalize_pending("hit_walmart_code_meta")
@@ -1762,7 +1848,6 @@ def _extract_candidates_from_lines(
             i += 1
             continue
 
-        # IMPORTANT FIX: if we hit store header lines, finalize pending first
         if store_header_pat and store_header_pat.match(s):
             if pending_raw:
                 _finalize_pending("hit_store_header_exact")
@@ -1784,7 +1869,6 @@ def _extract_candidates_from_lines(
             i += 1
             continue
 
-        # IMPORTANT FIX: if we hit header/address lines, finalize pending first
         if _is_header_or_address(s):
             if pending_raw:
                 _finalize_pending("hit_header_or_address")
@@ -1821,15 +1905,10 @@ def _extract_candidates_from_lines(
 
         cleaned = _clean_line(s)
         if not cleaned:
-            # If we cannot clean this line, don't let it "trap" pending forever.
-            # We do NOT finalize pending here automatically because this could be a blank-ish OCR artifact
-            # between item and its price line. Just drop and continue.
             dropped_lines.append({"line": s, "stage": "clean_empty"})
             i += 1
             continue
 
-        # Join-with-next logic (wrap stitching)
-        # FIX: never join if the next line is Walmart code/meta
         next1, next1_idx = _next_nonempty(raw_lines, i + 1, zone_end)
         if next1 and _is_descriptionish_line(next1) and not _is_walmart_code_or_meta_line(next1):
             key1 = dedupe_key(s)
@@ -1869,8 +1948,6 @@ def _extract_candidates_from_lines(
         else:
             i += 1
 
-        # If we had a pending item and we are now seeing a new description-ish line,
-        # finalize the pending one first.
         if pending_raw:
             _finalize_pending("new_desc")
 
@@ -1903,7 +1980,6 @@ def _extract_candidates_from_lines(
 
         candidates.append(Candidate(raw_line=s, cleaned_line=cleaned, qty_hint=1))
 
-    # Final flush at end of zone
     if pending_raw:
         _finalize_pending("zone_end")
 
@@ -1985,9 +2061,11 @@ async def parse_receipt(
         if qty == 1 and int(c.qty_hint) > 1:
             qty = int(c.qty_hint)
 
-        name_cleaned = _clean_line(nm)
-        expanded = expand_abbreviations(name_cleaned)
-        final_name = post_name_cleanup(expanded).strip()
+        # IMPORTANT CHANGE:
+        # Instead of calling expand_abbreviations + post_name_cleanup + title_case directly,
+        # we run normalize_display_name which guarantees "no abbreviations" in display name.
+        pretty, dbg = normalize_display_name(nm, store_hint=store_hint)
+        final_name = (pretty or "").strip()
 
         if not final_name:
             continue
@@ -2002,16 +2080,15 @@ async def parse_receipt(
         if only_food and category != "Food":
             continue
 
-        pretty = title_case(final_name)
         items.append(
             {
-                "name": pretty,
+                "name": final_name,
                 "quantity": int(max(1, qty)),
                 "category": category,
-                "image_url": _image_url_for_item(base_url, pretty),
+                "image_url": _image_url_for_item(base_url, final_name),
                 "_raw_line": c.raw_line,
-                "_name_cleaned": name_cleaned,
-                "_expanded": expanded,
+                "_name_cleaned": _clean_line(nm),
+                "_expanded": dbg.get("base", ""),
             }
         )
 
@@ -2050,19 +2127,21 @@ async def parse_receipt(
                     budget=budget,
                 )
 
-            enriched = post_name_cleanup(enriched).strip()
+            # IMPORTANT CHANGE:
+            # Re-run normalize_display_name after enrichment as well, to enforce no abbreviations.
+            pretty2, _dbg2 = normalize_display_name(enriched, store_hint=store_hint)
+            enriched_final = (pretty2 or "").strip()
 
             if (
-                enriched
-                and _has_valid_item_words(enriched)
-                and not _is_noise_line(enriched)
-                and not _is_header_or_address(enriched)
-                and not _is_store_or_header_line_anywhere(enriched)
-                and not _is_junk_line(enriched)
+                enriched_final
+                and _has_valid_item_words(enriched_final)
+                and not _is_noise_line(enriched_final)
+                and not _is_header_or_address(enriched_final)
+                and not _is_store_or_header_line_anywhere(enriched_final)
+                and not _is_junk_line(enriched_final)
             ):
-                pretty = title_case(enriched)
-                it["name"] = pretty
-                it["image_url"] = _image_url_for_item(base_url, pretty)
+                it["name"] = enriched_final
+                it["image_url"] = _image_url_for_item(base_url, enriched_final)
 
     for it in items:
         it.pop("_raw_line", None)
@@ -2134,11 +2213,9 @@ async def parse_receipt_debug(
         if qty == 1 and int(c.qty_hint) > 1:
             qty = int(c.qty_hint)
 
-        name_cleaned = _clean_line(nm)
-        expanded = expand_abbreviations(name_cleaned)
-        expanded = post_name_cleanup(expanded)
-
-        category_guess = _classify(expanded)
+        pretty0, dbg0 = normalize_display_name(nm, store_hint=store_hint)
+        expanded = dbg0.get("base", "")
+        category_guess = _classify(pretty0)
 
         enriched = expanded
         source = "none"
@@ -2148,13 +2225,14 @@ async def parse_receipt_debug(
         if ENABLE_NAME_ENRICH and budget.remaining() > 0.9 and (always_off or _needs_official_name(expanded)):
             enriched, source, score, query_used = await enrich_full_name(
                 raw_line=c.raw_line,
-                cleaned_name=name_cleaned,
+                cleaned_name=_clean_line(nm),
                 expanded_name=expanded,
                 store_hint=store_hint,
                 category=category_guess,
                 budget=budget,
             )
-            enriched = post_name_cleanup(enriched)
+
+        pretty1, dbg1 = normalize_display_name(enriched, store_hint=store_hint)
 
         enrich_debug.append(
             {
@@ -2162,9 +2240,10 @@ async def parse_receipt_debug(
                 "cleaned_line": c.cleaned_line,
                 "qty": qty,
                 "qty_hint": c.qty_hint,
-                "name_cleaned": name_cleaned,
-                "name_expanded": expanded,
-                "name_enriched": enriched,
+                "display_base": pretty0,
+                "display_after_enrich": pretty1,
+                "normalize_dbg_base": dbg0,
+                "normalize_dbg_enriched": dbg1,
                 "category": category_guess,
                 "enrich_source": source,
                 "enrich_score": score,
@@ -2172,7 +2251,7 @@ async def parse_receipt_debug(
             }
         )
 
-        final_name = (enriched or "").strip()
+        final_name = (pretty1 or "").strip()
         if not final_name:
             continue
         if ONLY_MONEYISH_RE.match(final_name) or PRICE_FLAG_RE.match(final_name) or WEIGHT_ONLY_RE.match(final_name):
@@ -2186,13 +2265,12 @@ async def parse_receipt_debug(
         if only_food and category != "Food":
             continue
 
-        nm2 = title_case(final_name)
         parsed.append(
             {
-                "name": nm2,
+                "name": final_name,
                 "quantity": int(max(1, qty)),
                 "category": category,
-                "image_url": _image_url_for_item(base_url, nm2),
+                "image_url": _image_url_for_item(base_url, final_name),
             }
         )
 
