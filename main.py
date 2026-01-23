@@ -1106,6 +1106,22 @@ GLOBAL_TOKEN_MAP: dict[str, str] = {
     "ckn": "chicken",
     "chkn": "chicken",
     "bf": "beef",
+    "blk": "black",
+    "pepr": "pepper",
+    "grn": "green",
+    "chp": "chip",
+    "mffn": "muffin",
+    "sdls": "seedless",
+    "orig": "original",
+    "prog": "progresso",
+    "tus": "tuscan",
+    "bea": "beans",
+    "ches": "cheese",
+    "ex": "extra",
+    "srp": "sharp",
+    "ba": "bagels",
+    "belg": "belgioioso",   # later we can special-case to "BelGioioso"
+})
 
     # household
     "alc": "alcohol",
