@@ -853,9 +853,9 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "pub": "publix",
     "pbl": "publix",
     "pbx": "publix",
-    "gg": "good and gather",
-    "Gg": "good and gather",
-    "GG": "good and gather",
+    "gg": "Good & Gather",
+    "Gg": "Good & Gather",
+    "GG": "Good & Gather",
     "chees": "cheese",
 
     "rte": "rte",
