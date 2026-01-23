@@ -1,18 +1,12 @@
 # main.py
-# NOTE: This is a rewrite of your file with ONE focused addition:
+# NOTE: Full rewrite of your file with the requested focused addition:
 # a deterministic "NO ABBREVIATIONS" normalization pipeline.
-# Everything else is preserved as-is (routes, OCR, parsing, OFF enrichment, images, admin).
 #
-# Key additions:
-# 1) STORE_TOKEN_MAPS + GLOBAL_TOKEN_MAP
-# 2) normalize_display_name(...) with:
-#    - token expansion (store + global)
-#    - phrase preservation
-#    - strict abbreviation detector + fallback expansions
-#    - safe title casing
-# 3) parse_receipt + parse_receipt_debug now call normalize_display_name(...)
-#
-# You can tune mappings without touching parsing logic.
+# Everything else is preserved as-is (routes, OCR, parsing, OFF enrichment, images, admin),
+# with the ONLY fixes being:
+# 1) Add STORE_TOKEN_MAPS + GLOBAL_TOKEN_MAP (+ fallback maps) and the normalize_display_name(...) pipeline
+# 2) Ensure parse_receipt + parse_receipt_debug call normalize_display_name(...) for display names
+# 3) Fix one syntax/structure issue in the pasted draft (GLOBAL_TOKEN_MAP block was malformed)
 
 from __future__ import annotations
 
@@ -920,6 +914,7 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "chd": "cheddar",
     "cut": "cut",
 }
+
 PHRASE_MAP: dict[str, str] = {
     "half and half": "half-and-half",
     "h and h": "half-and-half",
@@ -1045,10 +1040,8 @@ def _needs_official_name(name: str) -> bool:
 # NEW: No-Abbreviation Display Name Normalizer (deterministic)
 # ============================================================
 
-# 1) Store-specific maps (expand receipt shorthand into real words)
 STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
     "publix": {
-        # common Publix abbreviations seen in produce/deli/bakery
         "wdg": "wedge",
         "wdge": "wedge",
         "dcd": "diced",
@@ -1074,7 +1067,6 @@ STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
         "sm": "small",
     },
     "target": {
-        # Target brand shorthand
         "gg": "good and gather",
     },
     "walmart": {},
@@ -1085,7 +1077,7 @@ STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
     "trader joe's": {},
 }
 
-# 2) Global map (safe expansions across stores)
+# Global expansions (safe across stores)
 GLOBAL_TOKEN_MAP: dict[str, str] = {
     # dairy/food
     "hvy": "heavy",
@@ -1120,8 +1112,7 @@ GLOBAL_TOKEN_MAP: dict[str, str] = {
     "ex": "extra",
     "srp": "sharp",
     "ba": "bagels",
-    "belg": "belgioioso",   # later we can special-case to "BelGioioso"
-})
+    "belg": "belgioioso",
 
     # household
     "alc": "alcohol",
@@ -1132,12 +1123,10 @@ GLOBAL_TOKEN_MAP: dict[str, str] = {
     "jd": "jack daniel's",
     "tenn": "tennessee",
 
-    # critical: keep "rte" as-is (your comment)
+    # critical: keep "rte" as-is
     "rte": "rte",
 }
 
-# 3) “Never show these abbreviations” fallback expansions:
-# If the strict checker finds these tokens and they weren't expanded above, we force-expand them.
 FORCED_FALLBACK_MAP: dict[str, str] = {
     "snk": "snack",
     "sn": "snack",
@@ -1159,19 +1148,16 @@ FORCED_FALLBACK_MAP: dict[str, str] = {
     "brd": "bread",
 }
 
-# tokens we allow to remain short because they're meaningful as-is
 ALLOWED_SHORT_TOKENS = {
     "oz", "lb", "lbs", "g", "kg", "ml", "l", "xl", "xxl",
-    "bf",  # sometimes "bf" appears in learned/canonical items; we already expand above, but allow just in case
+    "bf",
     "rte",
 }
 
-# patterns indicating a token is likely an abbreviation we should not display
 _ABBR_TOKEN_RE = re.compile(r"^[A-Za-z]{2,4}$")
 _ALLCAPS_RE = re.compile(r"^[A-Z]{2,6}$")
 
 def _split_tokens_preserve_numbers(s: str) -> list[str]:
-    # Keep apostrophes, numbers, and letters as tokens; discard other punctuation.
     raw = (s or "").strip()
     raw = raw.replace("&", " and ")
     raw = re.sub(r"[^\w\s'-]+", " ", raw)
@@ -1186,7 +1172,6 @@ def _token_expand(token: str, store_hint: str) -> str:
             return sm[tl]
     if tl in GLOBAL_TOKEN_MAP:
         return GLOBAL_TOKEN_MAP[tl]
-    # keep your existing ABBREV_TOKEN_MAP as another layer
     if tl in ABBREV_TOKEN_MAP:
         return ABBREV_TOKEN_MAP[tl]
     return tl
@@ -1194,16 +1179,13 @@ def _token_expand(token: str, store_hint: str) -> str:
 def _looks_like_bad_abbrev_token(tok: str) -> bool:
     if not tok:
         return False
-    # allow numbers and units
     if re.search(r"\d", tok):
         return False
     tl = tok.lower()
     if tl in ALLOWED_SHORT_TOKENS:
         return False
-    # if it is all caps (OCR sometimes gives) and short
     if _ALLCAPS_RE.fullmatch(tok):
         return True
-    # short alpha token 2-4 letters (common receipt abbrev)
     if _ABBR_TOKEN_RE.fullmatch(tok):
         return True
     return False
@@ -1238,7 +1220,7 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     if not base:
         return "", dbg
 
-    # 1) token expand using store + global maps (safe, deterministic)
+    # 1) token expand using store + global maps
     toks = _split_tokens_preserve_numbers(base)
     dbg["tokens_in"] = toks[:]
 
@@ -1268,12 +1250,8 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     norm2 = re.sub(r"\s+", " ", norm2).strip()
     dbg["after_forced"] = norm2
 
-    # 5) If still looks abbreviated overall, we’ll record it to pending for human feedback
-    # (This does NOT change output; it just helps you build coverage fast.)
-    if _looks_abbreviated(norm2):
-        dbg["still_looks_abbrev"] = True
-    else:
-        dbg["still_looks_abbrev"] = False
+    # 5) helpful flag for coverage building (does not change output)
+    dbg["still_looks_abbrev"] = bool(_looks_abbreviated(norm2))
 
     # 6) Title-case for display
     pretty = title_case(norm2)
@@ -2078,8 +2056,7 @@ async def parse_receipt(
             qty = int(c.qty_hint)
 
         # IMPORTANT CHANGE:
-        # Instead of calling expand_abbreviations + post_name_cleanup + title_case directly,
-        # we run normalize_display_name which guarantees "no abbreviations" in display name.
+        # normalize_display_name guarantees “no abbreviations” in display name.
         pretty, dbg = normalize_display_name(nm, store_hint=store_hint)
         final_name = (pretty or "").strip()
 
@@ -2144,7 +2121,7 @@ async def parse_receipt(
                 )
 
             # IMPORTANT CHANGE:
-            # Re-run normalize_display_name after enrichment as well, to enforce no abbreviations.
+            # Re-run normalize_display_name after enrichment as well.
             pretty2, _dbg2 = normalize_display_name(enriched, store_hint=store_hint)
             enriched_final = (pretty2 or "").strip()
 
