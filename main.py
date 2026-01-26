@@ -1,12 +1,6 @@
 # main.py
-# NOTE: Full rewrite of your file with the requested focused addition:
-# a deterministic "NO ABBREVIATIONS" normalization pipeline.
-#
-# Everything else is preserved as-is (routes, OCR, parsing, OFF enrichment, images, admin),
-# with the ONLY fixes being:
-# 1) Add STORE_TOKEN_MAPS + GLOBAL_TOKEN_MAP (+ fallback maps) and the normalize_display_name(...) pipeline
-# 2) Ensure parse_receipt + parse_receipt_debug call normalize_display_name(...) for display names
-# 3) Fix one syntax/structure issue in the pasted draft (GLOBAL_TOKEN_MAP block was malformed)
+# Full rewrite with deterministic "NO ABBREVIATIONS" display-name normalization.
+# Everything else is preserved (routes, OCR, parsing, enrichment, images, admin).
 
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, List, Dict
+from typing import Any, Optional, Tuple, List
 
 import httpx
 from fastapi import FastAPI, File, UploadFile, Query, Request, HTTPException
@@ -842,18 +836,22 @@ def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -
 # ============================================================
 
 ABBREV_TOKEN_MAP: dict[str, str] = {
+    # store/brands
     "pblx": "publix",
     "publx": "publix",
     "pub": "publix",
     "pbl": "publix",
     "pbx": "publix",
-    "gg": "Good & Gather",
-    "Gg": "Good & Gather",
-    "GG": "Good & Gather",
-    "chees": "cheese",
+    "gg": "good and gather",
 
+    # misc common OCR quirks
+    "chees": "cheese",
+    "ches": "cheese",
+
+    # keep as-is
     "rte": "rte",
 
+    # food terms
     "sar": "sargento",
     "arts": "artisan",
     "blnd": "blends",
@@ -1066,9 +1064,7 @@ STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
         "lg": "large",
         "sm": "small",
     },
-    "target": {
-        "gg": "good and gather",
-    },
+    "target": {"gg": "good and gather"},
     "walmart": {},
     "aldi": {},
     "costco": {},
@@ -1077,7 +1073,6 @@ STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
     "trader joe's": {},
 }
 
-# Global expansions (safe across stores)
 GLOBAL_TOKEN_MAP: dict[str, str] = {
     # dairy/food
     "hvy": "heavy",
@@ -1205,14 +1200,12 @@ def _force_expand_remaining_abbrevs(tokens: list[str]) -> list[str]:
 def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[str, Any]]:
     """
     Deterministic pipeline to ensure the DISPLAY NAME has no abbreviations.
-
     Returns: (normalized_name, debug_info)
     """
     dbg: dict[str, Any] = {}
     if not name:
         return "", dbg
 
-    # 0) baseline cleanup from your existing pipeline
     base = post_name_cleanup(expand_abbreviations(_clean_line(name))).strip()
     base = re.sub(r"\s+", " ", base).strip()
     dbg["base"] = base
@@ -1220,7 +1213,6 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     if not base:
         return "", dbg
 
-    # 1) token expand using store + global maps
     toks = _split_tokens_preserve_numbers(base)
     dbg["tokens_in"] = toks[:]
 
@@ -1228,7 +1220,6 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     for t in toks:
         expanded_tokens.append(_token_expand(t, store_hint))
 
-    # 2) phrase preservation (reuse your PHRASE_MAP)
     joined = " ".join(expanded_tokens).strip()
     norm = _normalize_for_phrase_match(joined)
     for k in sorted(PHRASE_MAP.keys(), key=lambda x: len(x.split()), reverse=True):
@@ -1237,7 +1228,6 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     norm = re.sub(r"\s+", " ", norm).strip()
     dbg["after_store_global_expand"] = norm
 
-    # 3) strict “no abbreviations” enforcement pass
     toks2 = _split_tokens_preserve_numbers(norm)
     forced = _force_expand_remaining_abbrevs(toks2)
     dbg["forced_tokens"] = forced[:]
@@ -1245,15 +1235,12 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     norm2 = " ".join(forced).strip()
     norm2 = re.sub(r"\s+", " ", norm2).strip()
 
-    # 4) final sanity: remove any leftover internal codes
     norm2 = _strip_long_numeric_tokens(norm2)
     norm2 = re.sub(r"\s+", " ", norm2).strip()
     dbg["after_forced"] = norm2
 
-    # 5) helpful flag for coverage building (does not change output)
     dbg["still_looks_abbrev"] = bool(_looks_abbreviated(norm2))
 
-    # 6) Title-case for display
     pretty = title_case(norm2)
     dbg["pretty"] = pretty
     return pretty, dbg
@@ -2055,7 +2042,6 @@ async def parse_receipt(
         if qty == 1 and int(c.qty_hint) > 1:
             qty = int(c.qty_hint)
 
-        # IMPORTANT CHANGE:
         # normalize_display_name guarantees “no abbreviations” in display name.
         pretty, dbg = normalize_display_name(nm, store_hint=store_hint)
         final_name = (pretty or "").strip()
@@ -2120,7 +2106,6 @@ async def parse_receipt(
                     budget=budget,
                 )
 
-            # IMPORTANT CHANGE:
             # Re-run normalize_display_name after enrichment as well.
             pretty2, _dbg2 = normalize_display_name(enriched, store_hint=store_hint)
             enriched_final = (pretty2 or "").strip()
