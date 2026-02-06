@@ -2322,7 +2322,18 @@ async def instacart_create_list(req: InstacartCreateListRequest):
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
     data = r.json()
-    return {"products_link_url": data.get("products_link_url"), "raw": data}
+
+link = (
+    data.get("products_link_url")
+    or data.get("url")
+    or data.get("link")
+    or data.get("share_url")
+)
+
+if not link:
+    raise HTTPException(status_code=500, detail=f"Instacart response missing link: {data}")
+
+return {"url": link}
 
 
 # ============================================================
