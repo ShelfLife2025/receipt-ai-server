@@ -80,6 +80,11 @@ VISION_TMP_PATH = "/tmp/gcloud_key.json"
 PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
 PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
 
+# Instacart: allow override in case Instacart changes paths
+INSTACART_PRODUCTS_LINK_URL = (
+    os.getenv("INSTACART_PRODUCTS_LINK_URL") or "https://connect.instacart.com/idp/v1/products/products_link"
+).strip()
+
 # ============================================================
 # Startup / shutdown
 # ============================================================
@@ -87,6 +92,7 @@ PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
 @app.on_event("startup")
 async def _startup():
     global OFF_CLIENT, IMG_CLIENT, OFF_SEM, ENRICH_SEM, OFF_BUDGET_LOCK
+
     OFF_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(ENRICH_TIMEOUT_SECONDS),
         follow_redirects=True,
@@ -220,6 +226,7 @@ WM_DEPT_CODE_LINE_RE = re.compile(r"^\s*[A-Za-z]{2,24}\s*\d{6,14}\s*$")
 WM_ID_LINE_RE = re.compile(r"^\s*id\s+[a-z0-9]{6,}\s*$", re.IGNORECASE)
 WM_AT_FOR_LINE_RE = re.compile(r"\bat\s+\d+\s+for\b", re.IGNORECASE)
 
+
 def _is_walmart_code_or_meta_line(s: str) -> bool:
     if not s:
         return False
@@ -324,6 +331,7 @@ NOISE_PATTERNS = [
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
+
 def _noise_normalize(s: str) -> str:
     ss = (s or "").strip()
     if not ss:
@@ -336,10 +344,12 @@ def _noise_normalize(s: str) -> str:
     ss = re.sub(r"\s+", " ", ss).strip()
     return ss
 
+
 _NOISE_TOKENS_ALLOWED = {
     "target", "circle", "offer", "deal", "reward", "rewards", "discount", "off", "percent", "pct", "save", "savings"
 }
 _NOISE_IO_TOKEN_RE = re.compile(r"^[iIlL][oO0]$")
+
 
 def _is_noise_line(s: str) -> bool:
     if not s:
@@ -465,6 +475,7 @@ _JUNK_EXACT_LINES = {
     "t", "f", "tf", "t f", "ft", "tt", "ff",
     "grocery", "groceries",
 }
+
 
 def dedupe_key(s: str) -> str:
     s = (s or "").strip().lower()
@@ -938,6 +949,7 @@ PHRASE_MAP: dict[str, str] = {
     "balsamic vinegar": "balsamic vinegar",
 }
 
+
 def _normalize_for_phrase_match(s: str) -> str:
     s = (s or "").lower().strip()
     s = s.replace("&", " and ")
@@ -1152,12 +1164,14 @@ ALLOWED_SHORT_TOKENS = {
 _ABBR_TOKEN_RE = re.compile(r"^[A-Za-z]{2,4}$")
 _ALLCAPS_RE = re.compile(r"^[A-Z]{2,6}$")
 
+
 def _split_tokens_preserve_numbers(s: str) -> list[str]:
     raw = (s or "").strip()
     raw = raw.replace("&", " and ")
     raw = re.sub(r"[^\w\s'-]+", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
     return [t for t in raw.split(" ") if t]
+
 
 def _token_expand(token: str, store_hint: str) -> str:
     tl = token.lower()
@@ -1170,6 +1184,7 @@ def _token_expand(token: str, store_hint: str) -> str:
     if tl in ABBREV_TOKEN_MAP:
         return ABBREV_TOKEN_MAP[tl]
     return tl
+
 
 def _looks_like_bad_abbrev_token(tok: str) -> bool:
     if not tok:
@@ -1185,6 +1200,7 @@ def _looks_like_bad_abbrev_token(tok: str) -> bool:
         return True
     return False
 
+
 def _force_expand_remaining_abbrevs(tokens: list[str]) -> list[str]:
     out: list[str] = []
     for t in tokens:
@@ -1196,6 +1212,7 @@ def _force_expand_remaining_abbrevs(tokens: list[str]) -> list[str]:
         else:
             out.append(tl)
     return out
+
 
 def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[str, Any]]:
     """
@@ -1261,6 +1278,7 @@ _ENRICH_SCORE_STOPWORDS = {
     "pack", "ct", "count", "oz", "lb", "lbs", "g", "kg", "ml", "l",
     "publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "grocery", "groceries",
 }
+
 
 def _atomic_write_json(path: str, obj: Any) -> None:
     tmp = f"{path}.tmp"
@@ -1646,6 +1664,7 @@ TOTAL_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
     n = len(raw_lines)
     if n == 0:
@@ -1695,6 +1714,7 @@ class Candidate(BaseModel):
     cleaned_line: str
     qty_hint: int
 
+
 def looks_like_item_name(s: str) -> bool:
     s2 = (s or "").strip()
     if len(s2) < 3:
@@ -1703,9 +1723,9 @@ def looks_like_item_name(s: str) -> bool:
     low = s2.lower()
 
     bad = (
-        "subtotal","total","tax","visa","mastercard","amex","cash",
-        "change","balance","tender","refund","payment","store",
-        "auth","trace","acct","circle","savings",
+        "subtotal", "total", "tax", "visa", "mastercard", "amex", "cash",
+        "change", "balance", "tender", "refund", "payment", "store",
+        "auth", "trace", "acct", "circle", "savings",
     )
     if any(b in low for b in bad):
         return False
@@ -2031,7 +2051,6 @@ async def parse_receipt(
             pass
 
     store_hint = detect_store_hint(raw_lines)
-
     candidates, _dropped_lines = _extract_candidates_from_lines(raw_lines, store_hint=store_hint)
 
     base_url = _public_base_url(request)
@@ -2042,7 +2061,6 @@ async def parse_receipt(
         if qty == 1 and int(c.qty_hint) > 1:
             qty = int(c.qty_hint)
 
-        # normalize_display_name guarantees “no abbreviations” in display name.
         pretty, dbg = normalize_display_name(nm, store_hint=store_hint)
         final_name = (pretty or "").strip()
 
@@ -2106,7 +2124,6 @@ async def parse_receipt(
                     budget=budget,
                 )
 
-            # Re-run normalize_display_name after enrichment as well.
             pretty2, _dbg2 = normalize_display_name(enriched, store_hint=store_hint)
             enriched_final = (pretty2 or "").strip()
 
@@ -2279,7 +2296,7 @@ async def parse_receipt_debug(
 
 
 # ============================================================
-# Instacart list link (unchanged)
+# Instacart list link (FIXED + hardened)
 # ============================================================
 
 class InstacartLineItem(BaseModel):
@@ -2293,47 +2310,75 @@ class InstacartCreateListRequest(BaseModel):
     items: list[InstacartLineItem]
 
 
+def _extract_instacart_link(data: dict[str, Any]) -> str:
+    if not isinstance(data, dict):
+        return ""
+    # Most common keys seen in IDP responses
+    for k in ("products_link_url", "url", "link", "share_url", "productsLinkUrl"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    # Sometimes nested
+    for k in ("products_link", "productsLink", "result", "data"):
+        v = data.get(k)
+        if isinstance(v, dict):
+            lk = _extract_instacart_link(v)
+            if lk:
+                return lk
+    return ""
+
+
 @app.post("/instacart/create-list")
 @app.post("/instacart/create-list/")
 @app.post("/instacart/create_list")
 @app.post("/instacart/create_list/")
 async def instacart_create_list(req: InstacartCreateListRequest):
+    """
+    Returns a universal link that opens Instacart with the full shopping list preloaded.
+    (Your iOS app should open the returned URL; Instacart universal links should deep-open the app.)
+    """
     api_key = (os.getenv("INSTACART_API_KEY") or "").strip()
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY env var on server")
 
+    # NOTE: Keep payload shape consistent with the existing intent.
     payload = {
         "title": req.title,
         "link_type": "shopping_list",
         "line_items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in req.items],
     }
 
-    url = "https://connect.instacart.com/idp/v1/products/products_link"
+    url = INSTACART_PRODUCTS_LINK_URL
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, headers=headers, json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            r = await client.post(url, headers=headers, json=payload)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Instacart request failed: {e}")
 
     if r.status_code >= 400:
+        # keep response body for debugging
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
-    data = r.json()
+    try:
+        data = r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Instacart returned non-JSON: {r.text[:500]}")
 
-link = (
-    data.get("products_link_url")
-    or data.get("url")
-    or data.get("link")
-    or data.get("share_url")
-)
+    link = _extract_instacart_link(data)
+    if not link:
+        raise HTTPException(status_code=502, detail=f"Instacart response missing link: {data}")
 
-if not link:
-    raise HTTPException(status_code=500, detail=f"Instacart response missing link: {data}")
+    # Final safety: ensure it's a URL-looking string
+    if not (link.startswith("http://") or link.startswith("https://") or link.startswith("instacart://")):
+        raise HTTPException(status_code=502, detail=f"Instacart returned unexpected link: {link}")
 
-return {"url": link}
+    return {"url": link}
 
 
 # ============================================================
