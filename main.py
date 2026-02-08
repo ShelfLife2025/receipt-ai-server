@@ -84,7 +84,6 @@ async def instacart_create_list(payload: CreateInstacartListIn):
 
     url = f"{INSTACART_BASE_URL}/idp/v1/products/products_link"
 
-    try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(
                 url,
