@@ -85,16 +85,18 @@ async def instacart_create_list(payload: CreateInstacartListIn):
     url = f"{INSTACART_BASE_URL}/idp/v1/products/products_link"
 
     try:
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(
-            url,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {INSTACART_API_KEY}",
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {INSTACART_API_KEY}",
             },
             json=req_body,
         )
+except httpx.RequestError as e:
+    raise HTTPException(status_code=502, detail=f"Instacart request failed: {repr(e)}")
 except httpx.RequestError as e:
     raise HTTPException(status_code=502, detail=f"Instacart request failed: {repr(e)}")
 
