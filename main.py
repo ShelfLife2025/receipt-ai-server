@@ -29,6 +29,82 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# =========================
+# Instacart "Buy Now" link
+# =========================
+from typing import List, Optional
+from pydantic import BaseModel, Field
+from fastapi import HTTPException
+import os
+import httpx
+
+INSTACART_API_KEY = os.getenv("INSTACART_API_KEY", "").strip()
+INSTACART_BASE_URL = os.getenv("INSTACART_BASE_URL", "https://connect.dev.instacart.tools").strip()
+
+class ShoppingListItemIn(BaseModel):
+    name: str
+    quantity: Optional[float] = 1
+    unit: Optional[str] = None   # e.g. "each"
+    upc: Optional[str] = None    # optional
+
+class CreateInstacartListIn(BaseModel):
+    title: str = "ShelfLife Shopping List"
+    items: List[ShoppingListItemIn] = Field(default_factory=list)
+
+class CreateInstacartListOut(BaseModel):
+    products_link_url: str
+
+@app.post("/instacart/create-list", response_model=CreateInstacartListOut)
+async def instacart_create_list(payload: CreateInstacartListIn):
+    if not INSTACART_API_KEY:
+        raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY on server.")
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Shopping list is empty.")
+
+    line_items = []
+    for it in payload.items:
+        li = {"name": it.name}
+
+        if it.quantity is not None:
+            li["quantity"] = float(it.quantity)
+
+        if it.unit:
+            li["unit"] = it.unit  # if omitted, Instacart defaults to "each"
+
+        if it.upc:
+            li["upcs"] = [it.upc]  # optional, helps matching
+
+        line_items.append(li)
+
+    req_body = {
+        "title": payload.title,
+        "link_type": "shopping_list",
+        "line_items": line_items,
+    }
+
+    url = f"{INSTACART_BASE_URL}/idp/v1/products/products_link"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {INSTACART_API_KEY}",
+            },
+            json=req_body,
+        )
+
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Instacart error {r.status_code}: {r.text}")
+
+    data = r.json()
+    link = data.get("products_link_url")
+    if not link:
+        raise HTTPException(status_code=502, detail=f"Unexpected Instacart response: {data}")
+
+    return {"products_link_url": link}
+
 # ============================================================
 # Clients / concurrency controls
 # ============================================================
