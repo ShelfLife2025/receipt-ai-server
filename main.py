@@ -97,18 +97,16 @@ async def instacart_create_list(payload: CreateInstacartListIn):
         )
 except httpx.RequestError as e:
     raise HTTPException(status_code=502, detail=f"Instacart request failed: {repr(e)}")
-except httpx.RequestError as e:
-    raise HTTPException(status_code=502, detail=f"Instacart request failed: {repr(e)}")
 
-    if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Instacart error {r.status_code}: {r.text}")
+if r.status_code >= 400:
+    raise HTTPException(status_code=502, detail=f"Instacart error {r.status_code}: {r.text}")
 
-    data = r.json()
-    link = data.get("products_link_url")
-    if not link:
-        raise HTTPException(status_code=502, detail=f"Unexpected Instacart response: {data}")
+data = r.json()
+link = data.get("products_link_url") or data.get("link_url")
+if not link:
+    raise HTTPException(status_code=502, detail=f"Instacart response missing link: {data}")
 
-    return {"products_link_url": link}
+return {"products_link_url": link}
 
 # ============================================================
 # Clients / concurrency controls
