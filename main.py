@@ -1,6 +1,12 @@
 # main.py
 # Full rewrite with deterministic "NO ABBREVIATIONS" display-name normalization.
 # Everything else is preserved (routes, OCR, parsing, enrichment, images, admin).
+#
+# DEPLOY FIXES INCLUDED:
+# - Removed the broken/duplicated Instacart block that had invalid indentation/try/except.
+# - Kept ONE Instacart create-list implementation (the hardened one).
+# - Consolidated imports to avoid duplicates/shadowing.
+# - Ensured FastAPI route decorators are unique + valid.
 
 from __future__ import annotations
 
@@ -14,13 +20,13 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, File, UploadFile, Query, Request, HTTPException
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from google.cloud import vision
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 from pydantic import BaseModel
 
 # ============================================================
@@ -28,84 +34,6 @@ from pydantic import BaseModel
 # ============================================================
 
 app = FastAPI()
-
-# =========================
-# Instacart "Buy Now" link
-# =========================
-from typing import List, Optional
-from pydantic import BaseModel, Field
-from fastapi import HTTPException
-import os
-import httpx
-
-INSTACART_API_KEY = os.getenv("INSTACART_API_KEY", "").strip()
-INSTACART_BASE_URL = os.getenv("INSTACART_BASE_URL", "https://connect.dev.instacart.tools").strip()
-
-class ShoppingListItemIn(BaseModel):
-    name: str
-    quantity: Optional[float] = 1
-    unit: Optional[str] = None   # e.g. "each"
-    upc: Optional[str] = None    # optional
-
-class CreateInstacartListIn(BaseModel):
-    title: str = "ShelfLife Shopping List"
-    items: List[ShoppingListItemIn] = Field(default_factory=list)
-
-class CreateInstacartListOut(BaseModel):
-    products_link_url: str
-
-@app.post("/instacart/create-list", response_model=CreateInstacartListOut)
-async def instacart_create_list(payload: CreateInstacartListIn):
-    if not INSTACART_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY on server.")
-    if not payload.items:
-        raise HTTPException(status_code=400, detail="Shopping list is empty.")
-
-    line_items = []
-    for it in payload.items:
-        li = {"name": it.name}
-
-        if it.quantity is not None:
-            li["quantity"] = float(it.quantity)
-
-        if it.unit:
-            li["unit"] = it.unit  # if omitted, Instacart defaults to "each"
-
-        if it.upc:
-            li["upcs"] = [it.upc]  # optional, helps matching
-
-        line_items.append(li)
-
-    req_body = {
-        "title": payload.title,
-        "link_type": "shopping_list",
-        "line_items": line_items,
-    }
-
-    url = f"{INSTACART_BASE_URL}/idp/v1/products/products_link"
-
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {INSTACART_API_KEY}",
-            },
-            json=req_body,
-        )
-except httpx.RequestError as e:
-    raise HTTPException(status_code=502, detail=f"Instacart request failed: {repr(e)}")
-
-if r.status_code >= 400:
-    raise HTTPException(status_code=502, detail=f"Instacart error {r.status_code}: {r.text}")
-
-data = r.json()
-link = data.get("products_link_url") or data.get("link_url")
-if not link:
-    raise HTTPException(status_code=502, detail=f"Instacart response missing link: {data}")
-
-return {"products_link_url": link}
 
 # ============================================================
 # Clients / concurrency controls
@@ -168,7 +96,7 @@ INSTACART_PRODUCTS_LINK_URL = (
 # ============================================================
 
 @app.on_event("startup")
-async def _startup():
+async def _startup() -> None:
     global OFF_CLIENT, IMG_CLIENT, OFF_SEM, ENRICH_SEM, OFF_BUDGET_LOCK
 
     OFF_CLIENT = httpx.AsyncClient(
@@ -192,7 +120,7 @@ async def _startup():
 
 
 @app.on_event("shutdown")
-async def _shutdown():
+async def _shutdown() -> None:
     global OFF_CLIENT, IMG_CLIENT
     if OFF_CLIENT:
         await OFF_CLIENT.aclose()
@@ -580,7 +508,7 @@ def title_case(s: str) -> str:
 
         if "-" in raw:
             parts = [p for p in raw.split("-") if p != ""]
-            outp: list[str] = []
+            outp: List[str] = []
             for i, p in enumerate(parts):
                 pl = p.lower()
                 if i != 0 and pl in small:
@@ -598,7 +526,7 @@ def title_case(s: str) -> str:
 
         return lw[:1].upper() + lw[1:]
 
-    out: list[str] = []
+    out: List[str] = []
     for i, w in enumerate(words):
         out.append(cap_word(w, is_first=(i == 0)))
     return " ".join(out).strip()
@@ -829,8 +757,8 @@ def _classify(name: str) -> str:
     return "Food"
 
 
-def _dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
+def _dedupe_and_merge(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
     for it in items:
         k = dedupe_key(it["name"])
         if not k:
@@ -862,7 +790,7 @@ def _image_url_for_item(base_url: str, name: str) -> str:
 # Store hint (used only as a hint; do not drop store-brand items)
 # ============================================================
 
-STORE_HINTS: list[tuple[str, re.Pattern]] = [
+STORE_HINTS: List[Tuple[str, re.Pattern]] = [
     ("publix", re.compile(r"\bpublix\b", re.IGNORECASE)),
     ("walmart", re.compile(r"\bwalmart\b|\bwal[-\s]*mart\b|\bwm\s*supercenter\b", re.IGNORECASE)),
     ("target", re.compile(r"\btarget\b", re.IGNORECASE)),
@@ -873,7 +801,7 @@ STORE_HINTS: list[tuple[str, re.Pattern]] = [
     ("trader joe's", re.compile(r"\btrader\s+joe'?s\b", re.IGNORECASE)),
 ]
 
-STORE_HEADER_PATTERNS: dict[str, re.Pattern] = {
+STORE_HEADER_PATTERNS: Dict[str, re.Pattern] = {
     "publix": re.compile(r"^\s*publix(?:\s+super\s*markets?)?\s*$", re.IGNORECASE),
     "walmart": re.compile(r"^\s*(?:wm\s*supercenter|wal[-\s]*mart(?:\s+stores?)?|walmart(?:\s+supercenter)?)\s*$", re.IGNORECASE),
     "target": re.compile(r"^\s*o?target\s*$", re.IGNORECASE),
@@ -885,7 +813,7 @@ STORE_HEADER_PATTERNS: dict[str, re.Pattern] = {
 }
 
 
-def detect_store_hint(raw_lines: list[str]) -> str:
+def detect_store_hint(raw_lines: List[str]) -> str:
     blob = " \n ".join(raw_lines[:160]).lower()
     for name, pat in STORE_HINTS:
         if pat.search(blob):
@@ -924,7 +852,7 @@ def _is_probable_store_header_line(s: str, store_hint: str, position_idx: int) -
 # Abbrev expansion + phrase preservation (existing)
 # ============================================================
 
-ABBREV_TOKEN_MAP: dict[str, str] = {
+ABBREV_TOKEN_MAP: Dict[str, str] = {
     # store/brands
     "pblx": "publix",
     "publx": "publix",
@@ -1002,7 +930,7 @@ ABBREV_TOKEN_MAP: dict[str, str] = {
     "cut": "cut",
 }
 
-PHRASE_MAP: dict[str, str] = {
+PHRASE_MAP: Dict[str, str] = {
     "half and half": "half-and-half",
     "h and h": "half-and-half",
     "hnh": "half-and-half",
@@ -1046,7 +974,7 @@ def expand_abbreviations(name: str) -> str:
     raw = re.sub(r"\s+", " ", raw).strip()
 
     toks = [t for t in raw.split(" ") if t]
-    expanded: list[str] = []
+    expanded: List[str] = []
 
     for i, t in enumerate(toks):
         tl = t.lower()
@@ -1128,7 +1056,7 @@ def _needs_official_name(name: str) -> bool:
 # NEW: No-Abbreviation Display Name Normalizer (deterministic)
 # ============================================================
 
-STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
+STORE_TOKEN_MAPS: Dict[str, Dict[str, str]] = {
     "publix": {
         "wdg": "wedge",
         "wdge": "wedge",
@@ -1163,7 +1091,7 @@ STORE_TOKEN_MAPS: dict[str, dict[str, str]] = {
     "trader joe's": {},
 }
 
-GLOBAL_TOKEN_MAP: dict[str, str] = {
+GLOBAL_TOKEN_MAP: Dict[str, str] = {
     # dairy/food
     "hvy": "heavy",
     "whp": "whipping",
@@ -1212,7 +1140,7 @@ GLOBAL_TOKEN_MAP: dict[str, str] = {
     "rte": "rte",
 }
 
-FORCED_FALLBACK_MAP: dict[str, str] = {
+FORCED_FALLBACK_MAP: Dict[str, str] = {
     "snk": "snack",
     "sn": "snack",
     "chs": "cheese",
@@ -1243,7 +1171,7 @@ _ABBR_TOKEN_RE = re.compile(r"^[A-Za-z]{2,4}$")
 _ALLCAPS_RE = re.compile(r"^[A-Z]{2,6}$")
 
 
-def _split_tokens_preserve_numbers(s: str) -> list[str]:
+def _split_tokens_preserve_numbers(s: str) -> List[str]:
     raw = (s or "").strip()
     raw = raw.replace("&", " and ")
     raw = re.sub(r"[^\w\s'-]+", " ", raw)
@@ -1279,8 +1207,8 @@ def _looks_like_bad_abbrev_token(tok: str) -> bool:
     return False
 
 
-def _force_expand_remaining_abbrevs(tokens: list[str]) -> list[str]:
-    out: list[str] = []
+def _force_expand_remaining_abbrevs(tokens: List[str]) -> List[str]:
+    out: List[str] = []
     for t in tokens:
         if not t:
             continue
@@ -1292,12 +1220,12 @@ def _force_expand_remaining_abbrevs(tokens: list[str]) -> list[str]:
     return out
 
 
-def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[str, Any]]:
+def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, Dict[str, Any]]:
     """
     Deterministic pipeline to ensure the DISPLAY NAME has no abbreviations.
     Returns: (normalized_name, debug_info)
     """
-    dbg: dict[str, Any] = {}
+    dbg: Dict[str, Any] = {}
     if not name:
         return "", dbg
 
@@ -1311,7 +1239,7 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
     toks = _split_tokens_preserve_numbers(base)
     dbg["tokens_in"] = toks[:]
 
-    expanded_tokens: list[str] = []
+    expanded_tokens: List[str] = []
     for t in toks:
         expanded_tokens.append(_token_expand(t, store_hint))
 
@@ -1345,11 +1273,11 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, dict[s
 # Name enrichment (OFF + OPF/OBF + Learned Map + Pending collector)
 # ============================================================
 
-_ENRICH_CACHE: dict[str, Tuple[float, str, str, float]] = {}
+_ENRICH_CACHE: Dict[str, Tuple[float, str, str, float]] = {}
 _ENRICH_CACHE_TTL = int(os.getenv("ENRICH_CACHE_TTL_SECONDS", "86400"))
 
-_LEARNED_MAP: dict[str, str] = {}
-_PENDING: dict[str, dict[str, Any]] = {}
+_LEARNED_MAP: Dict[str, str] = {}
+_PENDING: Dict[str, Dict[str, Any]] = {}
 
 _ENRICH_SCORE_STOPWORDS = {
     "the", "and", "or", "of", "a", "an", "with", "for",
@@ -1446,7 +1374,7 @@ def _enrich_cache_set(key: str, name: str, source: str, score: float) -> None:
     _ENRICH_CACHE[key] = (time.time() + _ENRICH_CACHE_TTL, name, source, score)
 
 
-def _tokenize_for_score(s: str) -> list[str]:
+def _tokenize_for_score(s: str) -> List[str]:
     k = dedupe_key(s)
     return [t for t in k.split() if t and t not in _ENRICH_SCORE_STOPWORDS]
 
@@ -1502,7 +1430,7 @@ def _learned_map_lookup(raw_line: str, expanded_name: str, store_hint: str = "")
         dedupe_key(expanded_name),
     ]
 
-    keys: list[str] = []
+    keys: List[str] = []
     for k in base_keys:
         if not k:
             continue
@@ -1518,7 +1446,7 @@ def _learned_map_lookup(raw_line: str, expanded_name: str, store_hint: str = "")
     return None
 
 
-def _build_off_candidate(p: dict[str, Any]) -> str:
+def _build_off_candidate(p: Dict[str, Any]) -> str:
     product_name = (p.get("product_name_en") or p.get("product_name") or "").strip()
     brands = (p.get("brands") or "").strip()
     qty = (p.get("quantity") or "").strip()
@@ -1527,7 +1455,7 @@ def _build_off_candidate(p: dict[str, Any]) -> str:
     return " ".join(x for x in [brands, product_name, qty] if x).strip()
 
 
-async def _off_get(url: str, params: dict[str, Any], timeout_s: float) -> Optional[dict[str, Any]]:
+async def _off_get(url: str, params: Dict[str, Any], timeout_s: float) -> Optional[Dict[str, Any]]:
     global OFF_CLIENT, OFF_SEM
     if not OFF_CLIENT or not OFF_SEM:
         return None
@@ -1540,17 +1468,17 @@ async def _off_get(url: str, params: dict[str, Any], timeout_s: float) -> Option
         return None
 
 
-def _catalog_urls_for_category(category: str) -> list[tuple[str, str]]:
+def _catalog_urls_for_category(category: str) -> List[Tuple[str, str]]:
     cat = (category or "").strip().lower()
     if cat == "household":
-        out: list[tuple[str, str]] = []
+        out: List[Tuple[str, str]] = []
         if OPF_SEARCH_URL_WORLD:
             out.append(("openproductsfacts", OPF_SEARCH_URL_WORLD))
         if OBF_SEARCH_URL_WORLD:
             out.append(("openbeautyfacts", OBF_SEARCH_URL_WORLD))
         return out
 
-    urls: list[tuple[str, str]] = []
+    urls: List[Tuple[str, str]] = []
     if OFF_SEARCH_URL_US:
         urls.append(("openfoodfacts_us", OFF_SEARCH_URL_US))
     if OFF_SEARCH_URL_WORLD:
@@ -1570,7 +1498,7 @@ async def _catalog_best_match(
     if budget.expired():
         return None
 
-    variants: list[str] = [name]
+    variants: List[str] = [name]
 
     if store_hint and dedupe_key(store_hint) not in key:
         variants.append(f"{store_hint} {name}")
@@ -1579,7 +1507,7 @@ async def _catalog_best_match(
         variants.append(re.sub(r"\bpublix\b", "", key).strip())
 
     seen: set[str] = set()
-    qvars: list[str] = []
+    qvars: List[str] = []
     for v in variants:
         v = re.sub(r"\s+", " ", (v or "").strip())
         if not v:
@@ -1743,13 +1671,13 @@ TOTAL_MARKER_RE = re.compile(
 )
 
 
-def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
+def find_totals_marker_index(raw_lines: List[str]) -> Optional[int]:
     n = len(raw_lines)
     if n == 0:
         return None
 
     tail_start = max(0, n - max(65, n // 3))
-    candidates: list[int] = []
+    candidates: List[int] = []
     for idx in range(tail_start, n):
         ln = raw_lines[idx] or ""
         if TOTAL_MARKER_RE.search(ln):
@@ -1759,7 +1687,7 @@ def find_totals_marker_index(raw_lines: list[str]) -> Optional[int]:
     return candidates[-1] if candidates else None
 
 
-def _detect_item_zone_indices(raw_lines: list[str]) -> Tuple[int, int]:
+def _detect_item_zone_indices(raw_lines: List[str]) -> Tuple[int, int]:
     n = len(raw_lines)
     if n == 0:
         return 0, 0
@@ -1818,7 +1746,7 @@ def looks_like_item_name(s: str) -> bool:
     return True
 
 
-def _next_nonempty(raw_lines: list[str], idx: int, zone_end: int) -> Tuple[str, int]:
+def _next_nonempty(raw_lines: List[str], idx: int, zone_end: int) -> Tuple[str, int]:
     j = idx
     while j < zone_end:
         s = (raw_lines[j] or "").strip()
@@ -1858,15 +1786,15 @@ def _is_descriptionish_line(s: str) -> bool:
 
 
 def _extract_candidates_from_lines(
-    raw_lines: list[str],
+    raw_lines: List[str],
     store_hint: str,
-) -> Tuple[list[Candidate], list[dict[str, Any]]]:
-    dropped_lines: list[dict[str, Any]] = []
+) -> Tuple[List[Candidate], List[Dict[str, Any]]]:
+    dropped_lines: List[Dict[str, Any]] = []
 
     zone_start, zone_end = _detect_item_zone_indices(raw_lines)
     store_header_pat = STORE_HEADER_PATTERNS.get(store_hint) if store_hint else None
 
-    candidates: list[Candidate] = []
+    candidates: List[Candidate] = []
 
     pending_raw: Optional[str] = None
     pending_clean: Optional[str] = None
@@ -2081,7 +2009,7 @@ class ParsedItem(BaseModel):
 # ============================================================
 
 @app.get("/health")
-def health() -> dict[str, Any]:
+def health() -> Dict[str, Any]:
     return {"ok": True}
 
 
@@ -2089,8 +2017,8 @@ def health() -> dict[str, Any]:
 @app.post("/parse-receipt/", response_model=List[ParsedItem])
 async def parse_receipt(
     request: Request,
-    file: UploadFile | None = File(None),
-    image: UploadFile | None = File(None),
+    file: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(False, description="accepted but does not change response shape (use /parse-receipt-debug for wrapper)"),
 ):
@@ -2133,7 +2061,7 @@ async def parse_receipt(
 
     base_url = _public_base_url(request)
 
-    items: list[dict[str, Any]] = []
+    items: List[Dict[str, Any]] = []
     for c in candidates:
         qty, nm = _parse_quantity(c.cleaned_line)
         if qty == 1 and int(c.qty_hint) > 1:
@@ -2228,8 +2156,8 @@ async def parse_receipt(
 @app.post("/parse-receipt-debug/")
 async def parse_receipt_debug(
     request: Request,
-    file: UploadFile | None = File(None),
-    image: UploadFile | None = File(None),
+    file: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
     only_food: bool = Query(True, description="If true, return only Food items; if false, return Food + Household"),
     debug: bool = Query(True, description="kept for compatibility; this endpoint always returns wrapper"),
 ):
@@ -2276,8 +2204,8 @@ async def parse_receipt_debug(
 
     base_url = _public_base_url(request)
 
-    parsed: list[dict[str, Any]] = []
-    enrich_debug: list[dict[str, Any]] = []
+    parsed: List[Dict[str, Any]] = []
+    enrich_debug: List[Dict[str, Any]] = []
 
     always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
 
@@ -2374,7 +2302,7 @@ async def parse_receipt_debug(
 
 
 # ============================================================
-# Instacart list link (FIXED + hardened)
+# Instacart list link (FIXED + hardened)  ✅ SINGLE IMPLEMENTATION
 # ============================================================
 
 class InstacartLineItem(BaseModel):
@@ -2385,10 +2313,10 @@ class InstacartLineItem(BaseModel):
 
 class InstacartCreateListRequest(BaseModel):
     title: str = "ShelfLife Shopping List"
-    items: list[InstacartLineItem]
+    items: List[InstacartLineItem]
 
 
-def _extract_instacart_link(data: dict[str, Any]) -> str:
+def _extract_instacart_link(data: Dict[str, Any]) -> str:
     if not isinstance(data, dict):
         return ""
     # Most common keys seen in IDP responses
@@ -2410,7 +2338,7 @@ def _extract_instacart_link(data: dict[str, Any]) -> str:
 @app.post("/instacart/create-list/")
 @app.post("/instacart/create_list")
 @app.post("/instacart/create_list/")
-async def instacart_create_list(req: InstacartCreateListRequest):
+async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, str]:
     """
     Returns a universal link that opens Instacart with the full shopping list preloaded.
     (Your iOS app should open the returned URL; Instacart universal links should deep-open the app.)
@@ -2419,7 +2347,6 @@ async def instacart_create_list(req: InstacartCreateListRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY env var on server")
 
-    # NOTE: Keep payload shape consistent with the existing intent.
     payload = {
         "title": req.title,
         "link_type": "shopping_list",
@@ -2440,7 +2367,6 @@ async def instacart_create_list(req: InstacartCreateListRequest):
         raise HTTPException(status_code=502, detail=f"Instacart request failed: {e}")
 
     if r.status_code >= 400:
-        # keep response body for debugging
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
     try:
@@ -2452,7 +2378,6 @@ async def instacart_create_list(req: InstacartCreateListRequest):
     if not link:
         raise HTTPException(status_code=502, detail=f"Instacart response missing link: {data}")
 
-    # Final safety: ensure it's a URL-looking string
     if not (link.startswith("http://") or link.startswith("https://") or link.startswith("instacart://")):
         raise HTTPException(status_code=502, detail=f"Instacart returned unexpected link: {link}")
 
@@ -2463,11 +2388,11 @@ async def instacart_create_list(req: InstacartCreateListRequest):
 # Image delivery (cached)
 # ============================================================
 
-_IMAGE_CACHE: dict[str, bytes] = {}
-_IMAGE_CONTENT_TYPE_CACHE: dict[str, str] = {}
+_IMAGE_CACHE: Dict[str, bytes] = {}
+_IMAGE_CONTENT_TYPE_CACHE: Dict[str, str] = {}
 _MAX_CACHE_ITEMS = 2000
 
-PRODUCT_IMAGE_MAP: dict[str, str] = {
+PRODUCT_IMAGE_MAP: Dict[str, str] = {
     "sargento artisan blends parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
     "philadelphia cream cheese": "https://images.unsplash.com/photo-1589301763197-9713a1e1e5c0?w=512&q=80",
     "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
@@ -2481,7 +2406,7 @@ PRODUCT_IMAGE_MAP: dict[str, str] = {
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
 
 
-def _cache_key(name: str, upc: str | None, product_id: str | None) -> str:
+def _cache_key(name: str, upc: Optional[str], product_id: Optional[str]) -> str:
     if product_id and product_id.strip():
         return f"pid:{product_id.strip()}"
     if upc and upc.strip():
@@ -2496,7 +2421,7 @@ def _trim_caches_if_needed() -> None:
     _IMAGE_CONTENT_TYPE_CACHE.clear()
 
 
-async def fetch_image(url: str, headers: dict[str, str] | None = None) -> Optional[Tuple[bytes, str]]:
+async def fetch_image(url: str, headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[bytes, str]]:
     global IMG_CLIENT
     if not IMG_CLIENT:
         return None
@@ -2514,8 +2439,8 @@ async def fetch_image(url: str, headers: dict[str, str] | None = None) -> Option
 @app.get("/image")
 async def get_product_image(
     name: str = Query(..., description="product name to fetch image for"),
-    upc: str | None = Query(None, description="UPC/GTIN if available"),
-    product_id: str | None = Query(None, description="catalog product id if available"),
+    upc: Optional[str] = Query(None, description="UPC/GTIN if available"),
+    product_id: Optional[str] = Query(None, description="catalog product id if available"),
 ):
     ck = _cache_key(name, upc, product_id)
 
@@ -2523,7 +2448,7 @@ async def get_product_image(
         return Response(content=_IMAGE_CACHE[ck], media_type=_IMAGE_CONTENT_TYPE_CACHE[ck])
 
     if PACKSHOT_SERVICE_URL:
-        qp: list[str] = []
+        qp: List[str] = []
         if product_id:
             qp.append(f"product_id={urllib.parse.quote(product_id.strip())}")
         if upc:
@@ -2571,7 +2496,7 @@ async def get_product_image(
 # Admin endpoints (pending -> learned map)
 # ============================================================
 
-def _require_admin(key: str | None) -> None:
+def _require_admin(key: Optional[str]) -> None:
     if not ADMIN_KEY:
         raise HTTPException(status_code=500, detail="ADMIN_KEY not set on server")
     if not key or key.strip() != ADMIN_KEY:
@@ -2579,13 +2504,13 @@ def _require_admin(key: str | None) -> None:
 
 
 @app.get("/admin/learned-map")
-async def admin_learned_map(key: str | None = Query(None)):
+async def admin_learned_map(key: Optional[str] = Query(None)):
     _require_admin(key)
     return {"entries": len(_LEARNED_MAP), "path": NAME_MAP_PATH}
 
 
 @app.get("/admin/pending")
-async def admin_pending(key: str | None = Query(None), limit: int = Query(200)):
+async def admin_pending(key: Optional[str] = Query(None), limit: int = Query(200)):
     _require_admin(key)
     items = list(_PENDING.items())
     items.sort(key=lambda kv: int((kv[1] or {}).get("count", 0)), reverse=True)
@@ -2601,7 +2526,7 @@ class FeedbackBody(BaseModel):
 
 
 @app.post("/admin/feedback")
-async def admin_feedback(body: FeedbackBody, key: str | None = Query(None)):
+async def admin_feedback(body: FeedbackBody, key: Optional[str] = Query(None)):
     _require_admin(key)
 
     expanded = (body.expanded or "").strip()
@@ -2611,7 +2536,7 @@ async def admin_feedback(body: FeedbackBody, key: str | None = Query(None)):
     if not expanded or not full_name:
         raise HTTPException(status_code=400, detail="expanded and full_name required")
 
-    updates: dict[str, str] = {}
+    updates: Dict[str, str] = {}
     updates[expanded] = full_name
     updates[dedupe_key(expanded)] = full_name
     if store_hint:
@@ -2620,7 +2545,7 @@ async def admin_feedback(body: FeedbackBody, key: str | None = Query(None)):
         updates[f"{store_hint}:{dedupe_key(expanded)}"] = full_name
         updates[f"{dedupe_key(store_hint)}:{dedupe_key(expanded)}"] = full_name
 
-    current: dict[str, str] = {}
+    current: Dict[str, str] = {}
     try:
         if os.path.exists(NAME_MAP_PATH):
             with open(NAME_MAP_PATH, "r", encoding="utf-8") as f:
