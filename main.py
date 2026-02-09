@@ -2303,6 +2303,9 @@ async def parse_receipt_debug(
 
 # ============================================================
 # Instacart list link (FIXED + hardened)  ✅ SINGLE IMPLEMENTATION
+# Accept BOTH payloads:
+#   - {"title": "...", "items": [...]}
+#   - {"title": "...", "link_type": "...", "line_items": [...]}
 # ============================================================
 
 class InstacartLineItem(BaseModel):
@@ -2313,7 +2316,17 @@ class InstacartLineItem(BaseModel):
 
 class InstacartCreateListRequest(BaseModel):
     title: str = "ShelfLife Shopping List"
-    items: List[InstacartLineItem]
+
+    # ✅ preferred / new shape
+    items: Optional[List[InstacartLineItem]] = None
+
+    # ✅ backward-compatible shape (what your app screenshot shows it’s sending)
+    line_items: Optional[List[InstacartLineItem]] = None
+    link_type: Optional[str] = None
+
+
+def _normalized_instacart_items(req: InstacartCreateListRequest) -> List[InstacartLineItem]:
+    return req.items or req.line_items or []
 
 
 def _extract_instacart_link(data: Dict[str, Any]) -> str:
@@ -2347,10 +2360,15 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY env var on server")
 
+    items = _normalized_instacart_items(req)
+    if not items:
+        # Keep this explicit so either payload shape works but empty payloads fail clearly
+        raise HTTPException(status_code=422, detail="Field required: items")
+
     payload = {
         "title": req.title,
         "link_type": "shopping_list",
-        "line_items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in req.items],
+        "line_items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items],
     }
 
     url = INSTACART_PRODUCTS_LINK_URL
