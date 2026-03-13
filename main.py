@@ -1391,7 +1391,7 @@ def _extract_candidates_from_lines(raw_lines: List[str], store_hint: str) -> Tup
 
         if _is_noise_line(s):
             if pending_raw:
-                finalize_pending("hit_noise"})
+                finalize_pending("hit_noise")
             dropped_lines.append({"line": s, "stage": "noise"})
             i += 1
             continue
@@ -1775,23 +1775,59 @@ def _classify(name: str) -> str:
     return "Food"
 
 
+def _safe_merge_key(name: str) -> str:
+    s = dedupe_key(name)
+    s = re.sub(r"\b\d+(?:\.\d+)?\s*(oz|fl oz|lb|lbs|g|kg|ct|pack|pk)\b", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _token_set(name: str) -> set[str]:
+    return set(t for t in dedupe_key(name).split() if t)
+
+
+def _should_merge_items(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    if (a.get("category") or "Food") != (b.get("category") or "Food"):
+        return False
+
+    a_name = (a.get("name") or "").strip()
+    b_name = (b.get("name") or "").strip()
+    if not a_name or not b_name:
+        return False
+
+    a_key = _safe_merge_key(a_name)
+    b_key = _safe_merge_key(b_name)
+
+    if a_key == b_key:
+        return True
+
+    a_tokens = _token_set(a_name)
+    b_tokens = _token_set(b_name)
+
+    if not a_tokens or not b_tokens:
+        return False
+
+    overlap = len(a_tokens & b_tokens)
+
+    return overlap == len(a_tokens) == len(b_tokens)
+
+
 def _dedupe_and_merge(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    merged: List[Dict[str, Any]] = []
 
     for it in items:
-        key = dedupe_key(it["name"])
-        if not key:
-            continue
+        found = False
 
-        cat = (it.get("category") or "Food").strip()
-        mk = (key, cat)
+        for existing in merged:
+            if _should_merge_items(existing, it):
+                existing["quantity"] = int(existing["quantity"]) + int(it["quantity"])
+                found = True
+                break
 
-        if mk not in merged:
-            merged[mk] = dict(it)
-        else:
-            merged[mk]["quantity"] = int(merged[mk]["quantity"]) + int(it["quantity"])
+        if not found:
+            merged.append(dict(it))
 
-    return sorted(merged.values(), key=lambda x: (x.get("category") or "", x["name"].lower()))
+    return sorted(merged, key=lambda x: (x.get("category") or "", x["name"].lower()))
 
 
 # =========================
