@@ -2209,7 +2209,8 @@ async def parse_receipt(
     request: Request,
     file: Optional[UploadFile] = File(None),
     image: Optional[UploadFile] = File(None),
-    only_food: bool = Query(True),
+    only_food: bool = Query(False),
+    merge_duplicates: bool = Query(False),
     debug: bool = Query(False),
 ):
     upload = file or image
@@ -2282,7 +2283,8 @@ async def parse_receipt(
             "_expanded": dbg.get("base", ""),
         })
 
-    items = _dedupe_and_merge(items)
+    if merge_duplicates:
+        items = _dedupe_and_merge(items)
 
     if ENABLE_NAME_ENRICH and items and budget.remaining() > 1.0:
         always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
@@ -2340,7 +2342,8 @@ async def parse_receipt_debug(
     request: Request,
     file: Optional[UploadFile] = File(None),
     image: Optional[UploadFile] = File(None),
-    only_food: bool = Query(True),
+    only_food: bool = Query(False),
+    merge_duplicates: bool = Query(False),
     debug: bool = Query(True),
 ):
     upload = file or image
@@ -2452,7 +2455,8 @@ async def parse_receipt_debug(
             "image_url": _image_url_for_item(base_url, final_name),
         })
 
-    parsed = _dedupe_and_merge(parsed)
+    if merge_duplicates:
+        parsed = _dedupe_and_merge(parsed)
 
     return {
         "items": parsed,
