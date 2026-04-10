@@ -154,7 +154,80 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
         return []
 
     results: List[Optional[Dict]] = [None] * len(items)
-    uncached_indices: 
+       uncached_indices: List[int] = []
+
+    for i, item in enumerate(items):
+        key = item["name"].lower().strip()
+        if key in _ai_enrichment_cache:
+            results[i] = _ai_enrichment_cache[key].copy()
+        else:
+            uncached_indices.append(i)
+
+    if not uncached_indices:
+        return results  # type: ignore
+
+    uncached_items = [items[i] for i in uncached_indices]
+    gemini_succeeded = False
+
+    if GEMINI_API_KEY:
+        items_json = json.dumps(
+            [{"name": it["name"], "category": it["category"]} for it in uncached_items],
+            indent=2
+        )
+        prompt = f"""You are an expert grocery assistant. For each item below, return a JSON array with expires_in_days (int), storage ("fridge"/"freezer"/"pantry"), and category ("Food"/"Household"). Same order as input. No markdown, just JSON.
+
+Reference: chicken=2d fridge, ground beef=2d fridge, fish=2d fridge, fresh pasta/ravioli=3d fridge, milk=7d fridge, bread=5d pantry, eggs=21d fridge, butter=30d fridge, garlic bread=90d freezer, frozen pizza=180d freezer, frozen meat=270d freezer, chips=60d pantry, canned goods=730d pantry, dry pasta/rice=730d pantry, sugar/salt=3650d pantry.
+
+Items:
+{items_json}
+
+Respond with ONLY a valid JSON array."""
+
+        for model_name in ("gemini-2.0-flash-lite", "gemini-1.5-flash"):
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: model.generate_content(prompt)
+                )
+                raw_text = response.text.strip()
+                raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                raw_text = re.sub(r"\s*```$", "", raw_text)
+                gemini_results = json.loads(raw_text)
+
+                if not isinstance(gemini_results, list) or len(gemini_results) != len(uncached_items):
+                    raise ValueError("Bad response from Gemini")
+
+                valid_storages = {"fridge", "freezer", "pantry"}
+                valid_categories = {"Food", "Household"}
+
+                for j, (item, result) in enumerate(zip(uncached_items, gemini_results)):
+                    key = item["name"].lower().strip()
+                    enrichment = {
+                        "expires_in_days": int(result.get("expires_in_days", 14)),
+                        "storage": result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge",
+                        "category": result.get("category", "Food") if result.get("category") in valid_categories else "Food",
+                    }
+                    _ai_enrichment_cache[key] = enrichment
+                    results[uncached_indices[j]] = enrichment.copy()
+
+                gemini_succeeded = True
+                break
+            except Exception as exc:
+                print(f"[ai_enrichment] {model_name} failed: {exc}")
+                continue
+
+    if not gemini_succeeded:
+        for j, i in enumerate(uncached_indices):
+            key = items[i]["name"].lower().strip()
+            enrichment = _fallback_for_item(items[i]["name"])
+            _ai_enrichment_cache[key] = enrichment
+            results[i] = enrichment.copy()
+
+    for i in range(len(results)):
+        if results[i] is None:
+            results[i] = _fallback_for_item(items[i]["name"])
+
+    return results  # type: ignore
 
 PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
 PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
