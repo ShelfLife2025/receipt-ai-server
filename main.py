@@ -2499,9 +2499,9 @@ async def parse_receipt(
                 it["image_url"] = _image_url_for_item(base_url, enriched_final)
 
         for it in items:
-        it.pop("_raw_line", None)
-        it.pop("_name_cleaned", None)
-        it.pop("_expanded", None)
+            it.pop("_raw_line", None)
+            it.pop("_name_cleaned", None)
+            it.pop("_expanded", None)
 
     if items:
         enriched = await enrich_items_with_ai(items)
