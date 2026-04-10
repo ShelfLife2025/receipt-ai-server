@@ -2718,7 +2718,7 @@ async def admin_pending(key: Optional[str] = Query(None), limit: int = Query(200
 
     items = list(_PENDING.items())
     items.sort(key=lambda kv: int((kv[1] or {}).get("count", 0)), reverse=True)
-    out = [{"key": k, **v} for k, v in items[:max(1, min(limit, 2000))]}
+    out = [{"key": k, **v} for k, v in items[:max(1, min(limit, 2000))]]
 
     return {"pending": out, "total": len(_PENDING), "path": PENDING_PATH}
 
