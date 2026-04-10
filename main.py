@@ -1439,7 +1439,27 @@ def find_totals_marker_index(raw_lines: List[str]) -> Optional[int]:
             if MONEY_TOKEN_RE.search(ln) or len(dedupe_key(ln).split()) <= 6:
                 candidates.append(idx)
 
-    return candidates[-1] if candidates else None
+    if not candidates:
+        return None
+
+    best = candidates[-1]
+
+    # Walk backwards from the totals line to make sure we don't cut off
+    # weight-priced items (e.g. "POTATOES RUSSET" followed by "2.83 lb @ 1.79/lb")
+    # that appear just before the total. Include up to 4 extra lines.
+    for lookback in range(1, 5):
+        check_idx = best - lookback
+        if check_idx < 0:
+            break
+        ln = (raw_lines[check_idx] or "").strip()
+        if not ln:
+            continue
+        if _is_weight_or_unit_price_line(ln) or _is_price_like_line(ln) or WEIGHT_ONLY_RE.match(ln):
+            # The line before this might be the item name — push zone end past it
+            best = max(best, check_idx + 1)
+            break
+
+    return best
 
 
 def _detect_item_zone_indices(raw_lines: List[str], store_hint: str) -> Tuple[int, int]:
