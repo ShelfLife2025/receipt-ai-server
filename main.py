@@ -1215,6 +1215,7 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
     if _is_walmart_code_or_meta_line(ss):
         return True
 
+    # If the line has a price or qty hint, it's an item line — never a header
     if _raw_line_has_price_or_qty_hint(ss):
         return False
 
@@ -1228,6 +1229,8 @@ def _is_store_or_header_line_anywhere(s: str) -> bool:
 
     if STORE_WORDS_RE.search(ss):
         remaining = [t for t in toks if t not in _STORE_TOKENS and t not in _GENERIC_HEADER_TOKENS]
+        # If there are non-store words remaining, it's a product (e.g. "Publix Spring Water")
+        # Only kill it if it's ONLY store words
         if remaining:
             return False
         if len(toks) <= 8:
