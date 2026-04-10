@@ -154,7 +154,7 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
         return []
 
     results: List[Optional[Dict]] = [None] * len(items)
-       uncached_indices: List[int] = []
+    uncached_indices: List[int] = []
 
     for i, item in enumerate(items):
         key = item["name"].lower().strip()
