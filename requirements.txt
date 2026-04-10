@@ -7,4 +7,4 @@ httpx
 python-multipart
 python-multipart
 google-cloud-vision
-google-generativeai
+google-generativeai==0.8.3
