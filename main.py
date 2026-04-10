@@ -16,6 +16,7 @@ import httpx
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from google.cloud import vision
+import google.generativeai as genai
 from PIL import Image, ImageFilter, ImageOps
 from pydantic import BaseModel
 
@@ -58,8 +59,102 @@ PENDING_PATH = (os.getenv("PENDING_PATH") or "/tmp/pending_map.json").strip()
 PENDING_ENABLED = (os.getenv("PENDING_ENABLED", "1").strip() == "1")
 
 ADMIN_KEY = (os.getenv("ADMIN_KEY") or "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 VISION_TMP_PATH = "/tmp/gcloud_key.json"
+FOOD_KNOWLEDGE_FALLBACK: Dict[str, Dict] = {
+    "chicken breast":    {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
+    "chicken":           {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
+    "ground beef":       {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
+    "beef":              {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
+    "steak":             {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
+    "pork":              {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
+    "bacon":             {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "salmon":            {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
+    "shrimp":            {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
+    "fish":              {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
+    "deli meat":         {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
+    "hot dogs":          {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "sausage":           {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
+    "milk":              {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "eggs":              {"expires_in_days": 21,   "storage": "fridge",   "category": "Food"},
+    "butter":            {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
+    "cheese":            {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
+    "cream cheese":      {"expires_in_days": 10,   "storage": "fridge",   "category": "Food"},
+    "sour cream":        {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
+    "yogurt":            {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
+    "heavy cream":       {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "bread":             {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
+    "bagels":            {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
+    "tortillas":         {"expires_in_days": 7,    "storage": "pantry",   "category": "Food"},
+    "garlic bread":      {"expires_in_days": 90,   "storage": "freezer",  "category": "Food"},
+    "apples":            {"expires_in_days": 21,   "storage": "fridge",   "category": "Food"},
+    "bananas":           {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
+    "oranges":           {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
+    "strawberries":      {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
+    "blueberries":       {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "grapes":            {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "lettuce":           {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "spinach":           {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
+    "broccoli":          {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
+    "carrots":           {"expires_in_days": 21,   "storage": "fridge",   "category": "Food"},
+    "tomatoes":          {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
+    "onions":            {"expires_in_days": 30,   "storage": "pantry",   "category": "Food"},
+    "garlic":            {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
+    "potatoes":          {"expires_in_days": 30,   "storage": "pantry",   "category": "Food"},
+    "avocado":           {"expires_in_days": 4,    "storage": "pantry",   "category": "Food"},
+    "mushrooms":         {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
+    "ravioli":           {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
+    "fresh pasta":       {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
+    "hummus":            {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "salsa":             {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
+    "frozen pizza":      {"expires_in_days": 180,  "storage": "freezer",  "category": "Food"},
+    "frozen vegetables": {"expires_in_days": 365,  "storage": "freezer",  "category": "Food"},
+    "ice cream":         {"expires_in_days": 180,  "storage": "freezer",  "category": "Food"},
+    "frozen chicken":    {"expires_in_days": 270,  "storage": "freezer",  "category": "Food"},
+    "canned beans":      {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
+    "canned soup":       {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
+    "canned tuna":       {"expires_in_days": 1095, "storage": "pantry",   "category": "Food"},
+    "pasta":             {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
+    "rice":              {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
+    "cereal":            {"expires_in_days": 180,  "storage": "pantry",   "category": "Food"},
+    "crackers":          {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
+    "chips":             {"expires_in_days": 60,   "storage": "pantry",   "category": "Food"},
+    "peanut butter":     {"expires_in_days": 180,  "storage": "pantry",   "category": "Food"},
+    "olive oil":         {"expires_in_days": 365,  "storage": "pantry",   "category": "Food"},
+    "flour":             {"expires_in_days": 365,  "storage": "pantry",   "category": "Food"},
+    "sugar":             {"expires_in_days": 3650, "storage": "pantry",   "category": "Food"},
+    "salt":              {"expires_in_days": 3650, "storage": "pantry",   "category": "Food"},
+    "coffee":            {"expires_in_days": 180,  "storage": "pantry",   "category": "Food"},
+    "juice":             {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
+    "paper towels":      {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
+    "toilet paper":      {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
+    "dish soap":         {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "laundry detergent": {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "trash bags":        {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
+    "shampoo":           {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "toothpaste":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+}
+
+_ai_enrichment_cache: Dict[str, Dict] = {}
+
+def _fallback_for_item(name: str) -> Dict:
+    name_lower = name.lower().strip()
+    if name_lower in FOOD_KNOWLEDGE_FALLBACK:
+        return FOOD_KNOWLEDGE_FALLBACK[name_lower].copy()
+    for key in FOOD_KNOWLEDGE_FALLBACK:
+        if key in name_lower:
+            return FOOD_KNOWLEDGE_FALLBACK[key].copy()
+    return {"expires_in_days": 14, "storage": "fridge", "category": "Food"}
+
+async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
+    if not items:
+        return []
+
+    results: List[Optional[Dict]] = [None] * len(items)
+    uncached_indices: 
 
 PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
 PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
@@ -664,6 +759,8 @@ class ParsedItem(BaseModel):
     quantity: int
     category: str
     image_url: str
+    expires_in_days: Optional[int] = None
+    storage: Optional[str] = None
 
 
 class InstacartLineItem(BaseModel):
@@ -2328,10 +2425,18 @@ async def parse_receipt(
                 it["name"] = enriched_final
                 it["image_url"] = _image_url_for_item(base_url, enriched_final)
 
-    for it in items:
+        for it in items:
         it.pop("_raw_line", None)
         it.pop("_name_cleaned", None)
         it.pop("_expanded", None)
+
+    if items:
+        enriched = await enrich_items_with_ai(items)
+        for it, info in zip(items, enriched):
+            it["expires_in_days"] = info.get("expires_in_days")
+            it["storage"] = info.get("storage")
+            if info.get("category"):
+                it["category"] = info["category"]
 
     return items
 
