@@ -136,6 +136,14 @@ FOOD_KNOWLEDGE_FALLBACK: Dict[str, Dict] = {
     "trash bags":        {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
     "shampoo":           {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
     "toothpaste":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "tide":              {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
+    "laundry":           {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
+    "fresh step":        {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
+    "cat litter":        {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
+    "litter":            {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
+    "cremo":             {"expires_in_days": 730,  "storage": "pantry", "category": "Household"},
+    "body wash":         {"expires_in_days": 730,  "storage": "pantry", "category": "Household"},
+    "shaving":           {"expires_in_days": 730,  "storage": "pantry", "category": "Household"},
 }
 
 _ai_enrichment_cache: Dict[str, Dict] = {}
@@ -360,8 +368,15 @@ HOUSEHOLD_WORDS = {
     "shampoo", "conditioner", "deodorant", "toothpaste", "floss", "razor",
     "trash", "garbage", "bag", "bags", "foil", "wrap", "parchment",
     "rubbing", "alcohol", "isopropyl", "cotton", "swab", "swabs",
-    "battery", "batteries", "lightbulb", "lighter", "matches", "pet", "litter",
+    "battery", "batteries", "lightbulb", "lighter", "matches", "litter",
     "toothbrush", "mouthwash", "cleaning", "laundry", "sponge", "sponges",
+    "tide", "gain", "persil", "downy", "bounce", "dreft",
+    "fresh step", "freshstep", "frsh", "stp",
+    "cremo", "gillette", "dove", "axe", "old spice",
+    "febreze", "lysol", "clorox", "windex", "mr clean",
+    "cascade", "finish", "jet dry",
+    "ziploc", "glad", "hefty", "reynolds",
+    "cat litter", "kitty litter", "pet food", "dog food", "cat food",
 }
 
 NOISE_PATTERNS = [
@@ -478,6 +493,8 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
     r"\bshopping\s+center\b",
+    r"\bshoppes?\b",
+    r"\boak\s+grove\b",
     r"\bshopping\s+ctr\b",
     r"\b(?:target\s*)?circle\s*\d+\s*%\b",
     r"\b\d+\s*%\s*(?:off|discount)\b",
@@ -608,6 +625,46 @@ ABBREV_TOKEN_MAP: Dict[str, str] = {
     "veg": "vegetable",
     "oo": "olive oil",
     "apflr": "all purpose flour",
+
+        # Fresh Step cat litter
+    "frsh": "fresh",
+    "stp": "step",
+    "xtrm": "extreme",
+    "lght": "lightweight",
+    "wght": "weight",
+    "odor": "odor",
+
+    # Tide laundry
+    "he": "high efficiency",
+    "ren": "renewal",
+
+    # Brands
+    "amc": "angie's",
+    "ktl": "kettle",
+    "btr": "butter",
+    "gw": "great value",
+    "bac": "bacon",
+    "sbr": "sara lee",
+    "buff": "buffalo",
+    "wg": "wing",
+    "marind": "marinade",
+    "bens": "ben's",
+    "fg": "original",
+    "wld": "wild",
+    "buit": "buitoni",
+    "chse": "cheese",
+    "tortel": "tortellini",
+    "cremo": "cremo",
+    "bw": "barber grade",
+    "ital": "italian",
+    "berg": "bergamot",
+    "smit": "smith",
+    "din": "dinner",
+    "sav": "savory",
+    "roll": "rolls",
+    "kh": "king's hawaiian",
+    "wb": "wishbone",
+    "w/b": "wishbone",
 }
 
 PHRASE_MAP: Dict[str, str] = {
