@@ -497,6 +497,9 @@ NOISE_PATTERNS = [
     r"\b(?:target\s*)?circle\s*\d+\s*%\b",
     r"\b\d+\s*%\s*(?:off|discount)\b",
     r"\b(?:percent|pct)\s*off\b",
+    r"\boak\s*grove\s*shoppes?\b",
+    r"\boak\s*grove\b",
+    r"\bshoppes?\b",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
@@ -623,6 +626,57 @@ ABBREV_TOKEN_MAP: Dict[str, str] = {
     "veg": "vegetable",
     "oo": "olive oil",
     "apflr": "all purpose flour",
+
+    # Bacon / Great Value
+    "gw": "great value",
+    "bac": "bacon",
+    "bcon": "bacon",
+
+    # Chicken
+    "chick": "chicken",
+
+    # Buitoni tortellini
+    "buit": "buitoni",
+    "tortel": "tortellini",
+    "tortl": "tortellini",
+    "tortelini": "tortellini",
+
+    # Cremo Barber Grade Italian Bergamot
+    "bw": "barber grade",
+    "ital": "italian",
+    "berg": "bergamot",
+    "brb": "barber",
+    "brbr": "barber",
+
+    # Ben's Original rice
+    "bens": "ben's original",
+    "fg": "flavored grain",
+    "wld": "wild",
+    "lrg": "large",
+
+    # Fresh Step Lightweight
+    "lght": "lightweight",
+    "wght": "weight",
+    "lwt": "lightweight",
+
+    # AMC popcorn  
+    "ktl": "kettle",
+    "btr": "butter",
+
+    # Granny Smith apples
+    "smit": "smith",
+    "grny": "granny",
+
+    # Snyder's pretzels
+    "snyd": "snyder's",
+    "prtz": "pretzels",
+    "snap": "snap pretzels",
+
+    # Thomas bagels
+    "thms": "thomas",
+
+    # Rao's marinara
+    "rao": "rao's homemade",
 
     # Wishbone Ranch
     "wb": "wishbone",
@@ -797,9 +851,10 @@ _ALLCAPS_RE = re.compile(r"^[A-Z]{2,6}$")
 # Brand names that the catalog enrichment should NEVER overwrite.
 # If the expanded name starts with one of these, skip catalog lookup.
 _PROTECTED_BRAND_PREFIXES = {
-    "amc", "jack daniel's", "rao", "panera", "publix", "king's hawaiian",
-    "nutrl", "buitoni", "thomas", "snyder's", "ben's", "great value",
-    "sara lee", "wishbone", "cremo", "mojo",
+    "amc", "jack daniel's", "rao", "rao's", "panera", "publix", "king's hawaiian",
+    "nutrl", "buitoni", "thomas", "thomas'", "snyder's", "snyder", "ben's", "great value",
+    "sara lee", "wishbone", "cremo", "mojo", "buitoni", "granny smith",
+    "fresh step", "tide", "boneless chicken",
 }
 
 PRODUCT_IMAGE_MAP: Dict[str, str] = {
@@ -1835,6 +1890,63 @@ def post_name_cleanup(name: str) -> str:
         low = re.sub(r"\bsticks?\b", "butter sticks", low)
         low = re.sub(r"\bsalted?\b", "salted", low)
         low = re.sub(r"\s+", " ", low).strip()
+
+    # Fresh Step Lightweight Cat Litter
+    if "fresh" in low and ("lght" in low or "lightweight" in low or "light weight" in low):
+        return "fresh step lightweight cat litter"
+
+    # Fresh Step Extreme Odor
+    if "fresh" in low and ("xtrm" in low or "extreme" in low) and ("odor" in low or "step" in low):
+        return "fresh step extreme odor control cat litter"
+
+    # AMC Pop Kettle Butter Popcorn
+    if ("amc" in low or low.startswith("amc ")) and ("ktl" in low or "kettle" in low or "pop" in low):
+        return "amc kettle butter popcorn"
+
+    # Buitoni 5 Cheese Tortellini
+    if ("buit" in low or "buitoni" in low) and ("tortel" in low or "tortellini" in low or "chse" in low or "cheese" in low):
+        return "buitoni 5 cheese tortellini"
+
+    # Cremo Barber Grade Italian Bergamot
+    if "cremo" in low and ("berg" in low or "bergamot" in low or "ital" in low or "bw" in low or "barber" in low):
+        return "cremo barber grade italian bergamot"
+
+    # Ben's Original Flavored Grain Large Wild Rice
+    if ("ben" in low or "bens" in low) and ("wld" in low or "wild" in low or "fg" in low):
+        return "ben's original large wild rice"
+
+    # Great Value Brown Sugar Bacon
+    if ("gw" in low or "great value" in low) and ("bac" in low or "bacon" in low) and ("brn" in low or "brown" in low or "sugar" in low):
+        return "great value brown sugar bacon"
+
+    # Boneless Chicken Breast
+    if ("bnls" in low or "boneless" in low) and ("chick" in low or "chk" in low or "chicken" in low) and ("brst" in low or "breast" in low):
+        return "boneless chicken breast"
+
+    # Granny Smith Apples
+    if "apple" in low and ("smit" in low or "smith" in low or "granny" in low or "grny" in low):
+        return "granny smith apples"
+
+    # Snyder's Snap Pretzels
+    if ("snyder" in low or "snyd" in low) and ("snap" in low or "10ct" in low or "prtz" in low or "pretzels" in low):
+        return "snyder's of hanover snap pretzels"
+
+    # Thomas' Plain Bagels
+    if "thomas" in low and ("bagel" in low or "bgl" in low or "plain" in low or "pln" in low):
+        return "thomas' plain bagels"
+
+    # Rao's Marinara
+    if ("rao" in low) and ("marinara" in low or "sauce" in low):
+        return "rao's homemade marinara sauce"
+
+    # Nutrl Vodka
+    if "nutrl" in low or ("nutr" in low and "vodka" in low):
+        return "nutrl vodka seltzer"
+
+    # Publix Pasta (keep simple — it IS just publix pasta)
+    # Wishbone Ranch Dressing
+    if "wishbone" in low and "ranch" in low:
+        return "wishbone ranch dressing"
 
     toks = [t for t in low.split() if t]
     if toks and toks[-1] in {"sn"}:
