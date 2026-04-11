@@ -136,14 +136,19 @@ FOOD_KNOWLEDGE_FALLBACK: Dict[str, Dict] = {
     "trash bags":        {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
     "shampoo":           {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
     "toothpaste":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "tide":              {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
-    "laundry":           {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
-    "fresh step":        {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
-    "cat litter":        {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
-    "litter":            {"expires_in_days": 365,  "storage": "pantry", "category": "Household"},
-    "cremo":             {"expires_in_days": 730,  "storage": "pantry", "category": "Household"},
-    "body wash":         {"expires_in_days": 730,  "storage": "pantry", "category": "Household"},
-    "shaving":           {"expires_in_days": 730,  "storage": "pantry", "category": "Household"},
+    "tide":              {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "fresh step":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "cat litter":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
+    "popcorn":           {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
+    "kettle corn":       {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
+    "cheddar":           {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
+    "sharp cheddar":     {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
+    "marinade":          {"expires_in_days": 365,  "storage": "pantry",   "category": "Food"},
+    "dinner rolls":      {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
+    "hamburger buns":    {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
+    "ranch":             {"expires_in_days": 60,   "storage": "fridge",   "category": "Food"},
+    "vodka":             {"expires_in_days": 3650, "storage": "pantry",   "category": "Food"},
+    "butter":            {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
 }
 
 _ai_enrichment_cache: Dict[str, Dict] = {}
@@ -358,7 +363,7 @@ STORE_HEADER_PATTERNS: Dict[str, re.Pattern] = {
 
 _STORE_TOKENS = {"publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "whole", "foods", "trader", "joe", "joes", "wm"}
 _GENERIC_HEADER_TOKENS = {"super", "markets", "market", "stores", "store", "wholesale", "pharmacy", "supercenter"}
-_JUNK_EXACT_LINES = {"t", "f", "tf", "t f", "ft", "tt", "ff", "grocery", "groceries", "visa", "debit", "credit"}
+_JUNK_EXACT_LINES = {"t", "f", "tf", "t f", "ft", "tt", "ff", "grocery", "groceries", "visa", "debit", "credit", "for"}
 
 STOP_ITEM_WORDS = {"lb", "lbs", "oz", "g", "kg", "ct", "ea", "each", "w", "wt", "weight", "at", "x", "vov"}
 
@@ -368,15 +373,10 @@ HOUSEHOLD_WORDS = {
     "shampoo", "conditioner", "deodorant", "toothpaste", "floss", "razor",
     "trash", "garbage", "bag", "bags", "foil", "wrap", "parchment",
     "rubbing", "alcohol", "isopropyl", "cotton", "swab", "swabs",
-    "battery", "batteries", "lightbulb", "lighter", "matches", "litter",
+    "battery", "batteries", "lightbulb", "lighter", "matches", "pet", "litter",
     "toothbrush", "mouthwash", "cleaning", "laundry", "sponge", "sponges",
-    "tide", "gain", "persil", "downy", "bounce", "dreft",
-    "fresh step", "freshstep", "frsh", "stp",
-    "cremo", "gillette", "dove", "axe", "old spice",
-    "febreze", "lysol", "clorox", "windex", "mr clean",
-    "cascade", "finish", "jet dry",
-    "ziploc", "glad", "hefty", "reynolds",
-    "cat litter", "kitty litter", "pet food", "dog food", "cat food",
+    "tide", "febreze", "lysol", "cascade", "downy", "bounce", "gain",
+    "cremo", "barber", "bergamot", "extreme", "odor", "renewal", "freshstep",
 }
 
 NOISE_PATTERNS = [
@@ -493,8 +493,6 @@ NOISE_PATTERNS = [
     r"\bitems?\b\s*\d+\b",
     r"^\s*#\s*\d+\s*$",
     r"\bshopping\s+center\b",
-    r"\bshoppes?\b",
-    r"\boak\s+grove\b",
     r"\bshopping\s+ctr\b",
     r"\b(?:target\s*)?circle\s*\d+\s*%\b",
     r"\b\d+\s*%\s*(?:off|discount)\b",
@@ -626,45 +624,34 @@ ABBREV_TOKEN_MAP: Dict[str, str] = {
     "oo": "olive oil",
     "apflr": "all purpose flour",
 
-        # Fresh Step cat litter
-    "frsh": "fresh",
-    "stp": "step",
-    "xtrm": "extreme",
-    "lght": "lightweight",
-    "wght": "weight",
-    "odor": "odor",
+    # Wishbone Ranch
+    "wb": "wishbone",
 
-    # Tide laundry
-    "he": "high efficiency",
-    "ren": "renewal",
+    # AMC Theatres popcorn brand — keep as-is, do NOT expand
+    "amc": "amc",
 
-    # Brands
-    "amc": "angie's",
-    "ktl": "kettle",
-    "btr": "butter",
-    "gw": "great value",
-    "bac": "bacon",
+    # Sara Lee Buffalo Wing Marinade
     "sbr": "sara lee",
     "buff": "buffalo",
     "wg": "wing",
     "marind": "marinade",
-    "bens": "ben's",
-    "fg": "original",
-    "wld": "wild",
-    "buit": "buitoni",
-    "chse": "cheese",
-    "tortel": "tortellini",
-    "cremo": "cremo",
-    "bw": "barber grade",
-    "ital": "italian",
-    "berg": "bergamot",
-    "smit": "smith",
-    "din": "dinner",
-    "sav": "savory",
-    "roll": "rolls",
+
+    # King's Hawaiian
     "kh": "king's hawaiian",
-    "wb": "wishbone",
-    "w/b": "wishbone",
+    "sav": "savory",
+    "din": "dinner",
+    "rol": "rolls",
+
+    # Fresh Step Extreme
+    "xtrm": "extreme",
+    "stp": "step",
+
+    # Tide renewal / HE
+    "ren": "renewal",
+
+    # Butter sticks
+    "stk": "sticks",
+    "stks": "sticks",
 }
 
 PHRASE_MAP: Dict[str, str] = {
@@ -806,6 +793,14 @@ FORCED_FALLBACK_MAP: Dict[str, str] = {
 ALLOWED_SHORT_TOKENS = {"oz", "lb", "lbs", "g", "kg", "ml", "l", "xl", "xxl", "bf", "ea", "ct"}
 _ABBR_TOKEN_RE = re.compile(r"^[A-Za-z]{2,4}$")
 _ALLCAPS_RE = re.compile(r"^[A-Z]{2,6}$")
+
+# Brand names that the catalog enrichment should NEVER overwrite.
+# If the expanded name starts with one of these, skip catalog lookup.
+_PROTECTED_BRAND_PREFIXES = {
+    "amc", "jack daniel's", "rao", "panera", "publix", "king's hawaiian",
+    "nutrl", "buitoni", "thomas", "snyder's", "ben's", "great value",
+    "sara lee", "wishbone", "cremo", "mojo",
+}
 
 PRODUCT_IMAGE_MAP: Dict[str, str] = {
     "sargento artisan blends parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
@@ -1794,6 +1789,8 @@ def expand_abbreviations(name: str) -> str:
         return ""
 
     raw = (name or "").strip().replace("&", " and ").replace("-", " ")
+    # Replace W/B (Wishbone) before the slash is stripped
+    raw = re.sub(r"\bw/b\b", "wishbone", raw, flags=re.IGNORECASE)
     raw = re.sub(r"[^\w\s']", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
 
@@ -1832,6 +1829,12 @@ def post_name_cleanup(name: str) -> str:
 
     if low == "mojo oven roasted h" or (low.startswith("mojo oven roasted") and low.endswith(" h")):
         return "mojo oven roasted chicken"
+
+    # PUBLIX STICKS SALT -> Publix Salted Butter Sticks
+    if re.search(r"\bsticks?\b", low) and re.search(r"\bsalted?\b", low) and "butter" not in low:
+        low = re.sub(r"\bsticks?\b", "butter sticks", low)
+        low = re.sub(r"\bsalted?\b", "salted", low)
+        low = re.sub(r"\s+", " ", low).strip()
 
     toks = [t for t in low.split() if t]
     if toks and toks[-1] in {"sn"}:
@@ -2360,6 +2363,14 @@ async def enrich_full_name(
 
     always_off = (os.getenv("ALWAYS_OFF_ENRICH", "1").strip() == "1")
     should_try_catalog = always_off or _needs_official_name(expanded_name)
+
+    # Skip catalog lookup if expanded name starts with a protected brand
+    _exp_lower = expanded_name.lower()
+    if any(_exp_lower.startswith(brand) for brand in _PROTECTED_BRAND_PREFIXES):
+        _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
+        if cache_key:
+            _enrich_cache_set(cache_key, expanded_name, "protected_brand", 0.0)
+        return expanded_name, "protected_brand", 0.0, ""
 
     if not should_try_catalog:
         _pending_add(store_hint=store_hint, raw_line=raw_line, cleaned=cleaned_name, expanded=expanded_name)
