@@ -187,14 +187,20 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
             [{"name": it["name"], "category": it["category"]} for it in uncached_items],
             indent=2
         )
-        prompt = f"""You are an expert grocery assistant. For each item below, return a JSON array with expires_in_days (int), storage ("fridge"/"freezer"/"pantry"), and category ("Food"/"Household"). Same order as input. No markdown, just JSON.
+        prompt = f"""You are an expert grocery store assistant. For each item below, return a JSON array in the same order as the input.
 
-Reference: chicken=2d fridge, ground beef=2d fridge, fish=2d fridge, fresh pasta/ravioli=3d fridge, milk=7d fridge, bread=5d pantry, eggs=21d fridge, butter=30d fridge, garlic bread=90d freezer, frozen pizza=180d freezer, frozen meat=270d freezer, chips=60d pantry, canned goods=730d pantry, dry pasta/rice=730d pantry, sugar/salt=3650d pantry.
+For each item return these 4 fields:
+- full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand all abbreviations. Example: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon". If the name is already clean, return it as-is.
+- expires_in_days: integer number of days until expiration from purchase
+- storage: one of "fridge", "freezer", or "pantry"
+- category: either "Food" or "Household"
+
+Reference for expires_in_days: raw chicken/fish=2d fridge, ground beef=2d fridge, fresh pasta=3d fridge, milk=7d fridge, bacon=7d fridge, bread=5d pantry, eggs=21d fridge, butter=30d fridge, hard cheese=30d fridge, frozen meat=270d freezer, chips/crackers=60d pantry, canned goods=730d pantry, dry pasta/rice=730d pantry, laundry/household=730d pantry, sugar/salt=3650d pantry.
 
 Items:
 {items_json}
 
-Respond with ONLY a valid JSON array."""
+Respond with ONLY a valid JSON array, no markdown."""
 
         for model_name in ("gemini-2.0-flash-lite", "gemini-1.5-flash"):
             try:
@@ -215,7 +221,12 @@ Respond with ONLY a valid JSON array."""
 
                 for j, (item, result) in enumerate(zip(uncached_items, gemini_results)):
                     key = item["name"].lower().strip()
+                    # Use Gemini's full_name if it returned one and it looks valid
+                    gemini_full_name = (result.get("full_name") or "").strip()
+                    if gemini_full_name and len(gemini_full_name) >= 3:
+                        item["name"] = gemini_full_name
                     enrichment = {
+                        "full_name": gemini_full_name or item["name"],
                         "expires_in_days": int(result.get("expires_in_days", 14)),
                         "storage": result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge",
                         "category": result.get("category", "Food") if result.get("category") in valid_categories else "Food",
@@ -2713,6 +2724,11 @@ async def parse_receipt(
             it["storage"] = info.get("storage")
             if info.get("category"):
                 it["category"] = info["category"]
+            # Apply Gemini's full name if available
+            gemini_name = (info.get("full_name") or "").strip()
+            if gemini_name and len(gemini_name) >= 3:
+                it["name"] = gemini_name
+                it["image_url"] = _image_url_for_item(base_url, gemini_name)
 
     return items
 
