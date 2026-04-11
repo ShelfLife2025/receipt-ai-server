@@ -1489,6 +1489,19 @@ def _has_multiple_price_tokens(s: str) -> bool:
     return len(list(PRICE_SPAN_RE.finditer(s))) >= 2
 
 
+# Standalone single-word items that should never be merged with the next line
+_STANDALONE_ITEMS = {
+    "garlic", "carrots", "carrot", "apples", "apple", "bananas", "banana",
+    "oranges", "orange", "grapes", "grape", "lemons", "lemon", "limes", "lime",
+    "broccoli", "spinach", "lettuce", "onions", "onion", "potatoes", "potato",
+    "tomatoes", "tomato", "strawberries", "blueberries", "milk", "eggs", "butter",
+    "chicken", "beef", "pork", "salmon", "shrimp", "bread", "rice", "pasta",
+    "celery", "mushrooms", "mushroom", "avocado", "avocados", "kale", "corn",
+    "peaches", "peach", "plums", "plum", "cherries", "cherry", "mango", "mangos",
+    "pears", "pear", "watermelon", "pineapple", "cauliflower", "asparagus",
+    "zucchini", "cucumber", "peppers", "pepper", "radishes", "radish",
+}
+
 def _should_merge_with_next(head: str, tail: str, next_support: str) -> bool:
     if not head or not tail:
         return False
@@ -1496,6 +1509,17 @@ def _should_merge_with_next(head: str, tail: str, next_support: str) -> bool:
     head_key = dedupe_key(head)
     head_toks = head_key.split()
     if not head_toks:
+        return False
+
+    # Never merge if the head is already a complete standalone item name
+    if len(head_toks) == 1 and head_toks[0] in _STANDALONE_ITEMS:
+        return False
+
+    # Never merge if the tail starts with the same brand/store word as the head
+    # e.g. "PUBLIX PASTA" should not merge with "PUBLIX STICKS SALT"
+    tail_key = dedupe_key(tail)
+    tail_toks = tail_key.split()
+    if head_toks and tail_toks and head_toks[0] == tail_toks[0] and len(tail_toks) >= 2:
         return False
 
     short_lead = len(head_toks) <= MERGE_HEAD_MAX_TOKENS and len(head_key) <= MERGE_HEAD_MAX_LEN
