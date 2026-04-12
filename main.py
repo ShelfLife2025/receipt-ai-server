@@ -234,11 +234,15 @@ Respond with ONLY a valid JSON array, no markdown."""
                     gemini_words = len(gemini_full_name.split()) if gemini_full_name else 0
                     if gemini_full_name and len(gemini_full_name) >= 3 and gemini_words >= existing_words:
                         item["name"] = gemini_full_name
+                    # Always use our own classifier for category — Gemini gets this wrong
+                    # (e.g. it calls Cremo barber wash "Food"). Our HOUSEHOLD_WORDS list is authoritative.
+                    final_name_for_classify = item["name"]
+                    our_category = _classify(final_name_for_classify)
                     enrichment = {
                         "full_name": gemini_full_name or item["name"],
                         "expires_in_days": int(result.get("expires_in_days", 14)),
                         "storage": result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge",
-                        "category": result.get("category", "Food") if result.get("category") in valid_categories else "Food",
+                        "category": our_category,
                     }
                     _ai_enrichment_cache[key] = enrichment
                     results[uncached_indices[j]] = enrichment.copy()
@@ -253,6 +257,8 @@ Respond with ONLY a valid JSON array, no markdown."""
         for j, i in enumerate(uncached_indices):
             key = items[i]["name"].lower().strip()
             enrichment = _fallback_for_item(items[i]["name"])
+            # Always use our classifier for category
+            enrichment["category"] = _classify(items[i]["name"])
             _ai_enrichment_cache[key] = enrichment
             results[i] = enrichment.copy()
 
@@ -2116,6 +2122,8 @@ def normalize_display_name(name: str, store_hint: str = "") -> Tuple[str, Dict[s
 
     pretty = title_case(norm2)
     pretty = pretty.replace("And Gather", "& Gather") if pretty.startswith("Good And Gather") else pretty
+    # Remove any consecutive duplicate words (e.g. "Snap Pretzels Pretzels" -> "Snap Pretzels")
+    pretty = re.sub(r'\b(\w+)(\s+\1)+\b', r'\1', pretty, flags=re.IGNORECASE).strip()
     dbg["pretty"] = pretty
     return pretty, dbg
 
