@@ -2654,6 +2654,18 @@ async def parse_receipt(
 
     store_hint = detect_store_hint(raw_lines)
     candidates, _dropped_lines = _extract_candidates_from_lines(raw_lines, store_hint=store_hint)
+
+    # Debug: log dropped lines so we can see what's being filtered
+    _watch = {"frsh", "tide", "sbr", "kh", "pbx", "sharp", "savory", "buff", "marind", "spring", "xtrm", "renewal"}
+    for _dl in _dropped_lines:
+        _dl_low = (_dl.get("line") or "").lower()
+        if any(w in _dl_low for w in _watch):
+            print(f"[DROP] stage={_dl.get('stage')} line={_dl.get('line')!r} cleaned={_dl.get('cleaned')!r}", flush=True)
+    for _c in candidates:
+        _cl_low = (_c.cleaned_line or "").lower()
+        if any(w in _cl_low for w in _watch):
+            print(f"[CANDIDATE] {_c.cleaned_line!r}", flush=True)
+
     base_url = _public_base_url(request)
 
     items: List[Dict[str, Any]] = []
