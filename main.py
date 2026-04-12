@@ -223,7 +223,16 @@ Respond with ONLY a valid JSON array, no markdown."""
                     key = item["name"].lower().strip()
                     # Use Gemini's full_name if it returned one and it looks valid
                     gemini_full_name = (result.get("full_name") or "").strip()
-                    if gemini_full_name and len(gemini_full_name) >= 3:
+                    # Remove consecutive duplicate words Gemini sometimes adds
+                    # e.g. "Snyder's of Hanover Snap Pretzels Pretzels" -> remove second "Pretzels"
+                    gemini_full_name = re.sub(
+                        r'\b(\w+)\s+\1\b', r'\1', gemini_full_name, flags=re.IGNORECASE
+                    ).strip()
+                    # Only use Gemini's name if it is at least as long as what we already have
+                    # This prevents Gemini from dropping words (e.g. "Cat Litter" -> "Cat")
+                    existing_words = len(item["name"].split())
+                    gemini_words = len(gemini_full_name.split()) if gemini_full_name else 0
+                    if gemini_full_name and len(gemini_full_name) >= 3 and gemini_words >= existing_words:
                         item["name"] = gemini_full_name
                     enrichment = {
                         "full_name": gemini_full_name or item["name"],
@@ -1969,9 +1978,9 @@ def post_name_cleanup(name: str) -> str:
         return "mojo oven roasted chicken"
 
     # PUBLIX STICKS SALT -> Publix Salted Butter Sticks
-    if re.search(r"\bsticks?\b", low) and re.search(r"\bsalted?\b", low) and "butter" not in low:
+    if re.search(r"\bsticks?\b", low) and re.search(r"\bsalted?\b|\bsalt\b", low) and "butter" not in low:
         low = re.sub(r"\bsticks?\b", "butter sticks", low)
-        low = re.sub(r"\bsalted?\b", "salted", low)
+        low = re.sub(r"\bsalted?\b|\bsalt\b", "salted", low)
         low = re.sub(r"\s+", " ", low).strip()
 
     # Fresh Step Lightweight Cat Litter
@@ -2012,7 +2021,7 @@ def post_name_cleanup(name: str) -> str:
 
     # Snyder's Snap Pretzels
     if ("snyder" in low or "snyd" in low) and ("snap" in low or "10ct" in low or "prtz" in low or "pretzels" in low):
-        return "snyder's of hanover snap pretzels"
+        return "snyder's of hanover snap pretzels"  # Gemini must not add "Pretzels" again
 
     # Thomas' Plain Bagels
     if "thomas" in low and ("bagel" in low or "bgl" in low or "plain" in low or "pln" in low):
