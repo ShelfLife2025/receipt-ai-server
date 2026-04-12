@@ -1252,10 +1252,53 @@ def _is_noise_line(s: str) -> bool:
     return False
 
 
+# Words that, if a line starts with them, indicate it's a product — never an address.
+_PRODUCT_LEAD_WORDS = {
+    "FRSH", "SBR", "PBX", "TIDE", "DAWN", "GAIN", "BOUNTY", "CHARMIN", "GLAD",
+    "SCOTT", "HEFTY", "FEBREZE", "LYSOL", "CLOROX", "PALMOLIVE", "AJAX",
+    "PUBLIX", "GREAT", "SNYDER", "BUITONI", "KINGS", "KH", "AMC", "KROGER",
+    "NABISCO", "OREO", "PEPSI", "COKE", "SPRITE", "GATORADE", "POWERADE",
+    "TROPICANA", "DOLE", "CHOBANI", "YOPLAIT", "DANNON", "ACTIVIA",
+    "LAYS", "RUFFLES", "DORITOS", "CHEETOS", "PRINGLES", "TOSTITOS",
+    "CAMPBELL", "PROGRESSO", "HUNTS", "HEINZ", "KRAFT", "VELVEETA",
+    "HIDDEN", "RANCH", "KENS", "WISHBONE", "NEWMANS",
+    "BIRDS", "STOUFFERS", "LEAN", "HEALTHY", "WEIGHT",
+    "SARA", "PEPPERIDGE", "ARNOLD", "NATURES", "OTIS",
+    "BANQUET", "TYSON", "PERDUE", "FOSTER", "JIMMY", "HILLSHIRE",
+    "OSCAR", "BALL", "LAND", "HORIZON", "ORGANIC",
+    "FRESH", "ULTRA", "PREMIUM", "SELECT", "CHOICE",
+}
+
+def _looks_like_receipt_product_line(s: str) -> bool:
+    """Return True if this line looks like a receipt product abbreviation, not an address.
+    Criteria: all tokens are ALL-CAPS, avg token length <= 6, at least 2 tokens.
+    Also True if the first token is a known product-lead word.
+    """
+    toks = s.split()
+    if not toks:
+        return False
+    # Check for known product-lead word at start
+    if toks[0].upper() in _PRODUCT_LEAD_WORDS:
+        return True
+    # All-caps short-token heuristic (receipt abbreviations)
+    if len(toks) >= 2:
+        upper_toks = [t for t in toks if re.match(r'^[A-Z0-9]+$', t)]
+        if len(upper_toks) == len(toks):
+            avg_len = sum(len(t) for t in toks) / len(toks)
+            if avg_len <= 7:
+                return True
+    return False
+
+
 def _is_header_or_address(line: str) -> bool:
     s = (line or "").strip()
     if not s:
         return True
+
+    # Guard: if this looks like a receipt product line (all-caps abbreviations
+    # or starts with a known brand/product word), never treat it as an address.
+    if _looks_like_receipt_product_line(s):
+        return False
 
     if PHONEISH_RE.search(s) or ZIP_RE.search(s) or DATE_RE.search(s) or TIME_RE.search(s):
         return True
@@ -1520,6 +1563,11 @@ def _should_merge_with_next(head: str, tail: str, next_support: str) -> bool:
     tail_key = dedupe_key(tail)
     tail_toks = tail_key.split()
     if head_toks and tail_toks and head_toks[0] == tail_toks[0] and len(tail_toks) >= 2:
+        return False
+
+    # Never merge if the tail starts with a known brand/product lead word
+    # e.g. "PUBLIX PASTA" should not merge with "TIDE HE SPRING REN"
+    if tail_toks and tail_toks[0].upper() in _PRODUCT_LEAD_WORDS:
         return False
 
     short_lead = len(head_toks) <= MERGE_HEAD_MAX_TOKENS and len(head_key) <= MERGE_HEAD_MAX_LEN
