@@ -3073,12 +3073,39 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
 
-    key = dedupe_key(name)
-    img_url = PRODUCT_IMAGE_MAP.get(key, FALLBACK_PRODUCT_IMAGE)
+        key = dedupe_key(name)
+    img_url = PRODUCT_IMAGE_MAP.get(key)
+
+    if not img_url:
+        google_api_key = os.getenv("GOOGLE_IMAGE_API_KEY")
+        google_cx = os.getenv("GOOGLE_IMAGE_CX")
+        if google_api_key and google_cx:
+            try:
+                search_query = urllib.parse.quote(f"{name} product")
+                google_url = (
+                    f"https://www.googleapis.com/customsearch/v1"
+                    f"?key={google_api_key}&cx={google_cx}"
+                    f"&q={search_query}&searchType=image&num=1"
+                )
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(google_url)
+                    data = resp.json()
+                    items_found = data.get("items", [])
+                    if items_found:
+                        img_url = items_found[0].get("link")
+            except Exception as e:
+                print(f"[GOOGLE IMAGE] error for '{name}': {e}", flush=True)
+
+    if not img_url:
+        img_url = FALLBACK_PRODUCT_IMAGE
+
     result = await fetch_image(img_url)
     if result:
         img_bytes, ctype = result
         _IMAGE_CACHE[ck] = img_bytes
+        _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
+        _trim_caches_if_needed()
+        return Response(content=img_bytes, media_type=ctype)
         _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
         _trim_caches_if_needed()
         return Response(content=img_bytes, media_type=ctype)
