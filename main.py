@@ -919,10 +919,12 @@ async def _startup() -> None:
     ENRICH_SEM = asyncio.Semaphore(max(1, ENRICH_CONCURRENCY))
     OFF_BUDGET_LOCK = asyncio.Lock()
 
+    _IMAGE_CACHE.clear()
+    _IMAGE_CONTENT_TYPE_CACHE.clear()
     _init_google_credentials_file()
     _load_learned_map()
     _load_pending_map()
-    print("Startup complete.")
+    print("Startup complete. Image cache cleared.")
 
 
 @app.on_event("shutdown")
