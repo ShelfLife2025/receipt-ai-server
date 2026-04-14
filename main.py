@@ -3087,25 +3087,33 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                     f"?key={google_api_key}&cx={google_cx}"
                     f"&q={search_query}&searchType=image&num=1"
                 )
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    resp = await client.get(google_url)
-                    data = resp.json()
-                    items_found = data.get("items", [])
-                    if items_found:
-                        img_url = items_found[0].get("link")
+                async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as gclient:
+                    gresp = await gclient.get(google_url)
+                    gdata = gresp.json()
+                    print(f"[GOOGLE IMAGE] query='{name}' status={gresp.status_code} items={len(gdata.get('items', []))}", flush=True)
+                    gitems = gdata.get("items", [])
+                    if gitems:
+                        img_url = gitems[0].get("link")
+                        print(f"[GOOGLE IMAGE] found url='{img_url}'", flush=True)
             except Exception as e:
                 print(f"[GOOGLE IMAGE] error for '{name}': {e}", flush=True)
 
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
 
-    result = await fetch_image(img_url)
-    if result:
-        img_bytes, ctype = result
-        _IMAGE_CACHE[ck] = img_bytes
-        _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
-        _trim_caches_if_needed()
-        return Response(content=img_bytes, media_type=ctype)
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as iclient:
+            r = await iclient.get(img_url)
+            r.raise_for_status()
+            ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip().lower()
+            if ctype.startswith("image/"):
+                img_bytes = r.content
+                _IMAGE_CACHE[ck] = img_bytes
+                _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
+                _trim_caches_if_needed()
+                return Response(content=img_bytes, media_type=ctype)
+    except Exception as e:
+        print(f"[IMAGE FETCH] error fetching '{img_url}': {e}", flush=True)
 
     tiny_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
