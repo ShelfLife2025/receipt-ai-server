@@ -894,7 +894,7 @@ PRODUCT_IMAGE_MAP: Dict[str, str] = {
     "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
     "grapes": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
 }
-FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1604908177071-6c2b7b66010c?w=512&q=80"
+FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1542838132-92c53300491e?w=512&q=80"
 
 
 # =========================
@@ -3080,20 +3080,27 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     if not img_url:
         try:
+            await asyncio.sleep(0.3)
             search_query = urllib.parse.quote(name)
             upc_url = f"https://api.upcitemdb.com/prod/trial/search?s={search_query}&type=product"
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"Accept": "application/json"}) as uclient:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"Accept": "application/json", "User-Agent": "ShelfLife/1.0"}) as uclient:
                 uresp = await uclient.get(upc_url)
-                udata = uresp.json()
-                uitems = udata.get("items", [])
-                for item in uitems:
-                    images = item.get("images", [])
-                    if images:
-                        img_url = images[0]
-                        print(f"[UPC IMAGE] found '{img_url}' for '{name}'", flush=True)
-                        break
-                if not img_url:
-                    print(f"[UPC IMAGE] no image found for '{name}'", flush=True)
+                if uresp.status_code == 200:
+                    udata = uresp.json()
+                    uitems = udata.get("items", [])
+                    for item in uitems:
+                        images = item.get("images", [])
+                        for candidate in images:
+                            if candidate and candidate.startswith("http"):
+                                img_url = candidate
+                                print(f"[UPC IMAGE] found '{img_url}' for '{name}'", flush=True)
+                                break
+                        if img_url:
+                            break
+                    if not img_url:
+                        print(f"[UPC IMAGE] no image found for '{name}' status={uresp.status_code}", flush=True)
+                else:
+                    print(f"[UPC IMAGE] rate limited or error for '{name}' status={uresp.status_code}", flush=True)
         except Exception as e:
             print(f"[UPC IMAGE] error for '{name}': {e}", flush=True)
 
