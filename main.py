@@ -3079,26 +3079,23 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     img_url = PRODUCT_IMAGE_MAP.get(key)
 
     if not img_url:
-        google_api_key = os.getenv("GOOGLE_IMAGE_API_KEY")
-        google_cx = os.getenv("GOOGLE_IMAGE_CX")
-        if google_api_key and google_cx:
-            try:
-                search_query = urllib.parse.quote(f"{name} product")
-                google_url = (
-                    f"https://www.googleapis.com/customsearch/v1"
-                    f"?key={google_api_key}&cx={google_cx}"
-                    f"&q={search_query}&searchType=image&num=1"
-                )
-                async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as gclient:
-                    gresp = await gclient.get(google_url)
-                    gdata = gresp.json()
-                    print(f"[GOOGLE IMAGE] query='{name}' status={gresp.status_code} items={len(gdata.get('items', []))}", flush=True)
-                    gitems = gdata.get("items", [])
-                    if gitems:
-                        img_url = gitems[0].get("link")
-                        print(f"[GOOGLE IMAGE] found url='{img_url}'", flush=True)
-            except Exception as e:
-                print(f"[GOOGLE IMAGE] error for '{name}': {e}", flush=True)
+        try:
+            search_query = urllib.parse.quote(name)
+            upc_url = f"https://api.upcitemdb.com/prod/trial/search?s={search_query}&type=product"
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"Accept": "application/json"}) as uclient:
+                uresp = await uclient.get(upc_url)
+                udata = uresp.json()
+                uitems = udata.get("items", [])
+                for item in uitems:
+                    images = item.get("images", [])
+                    if images:
+                        img_url = images[0]
+                        print(f"[UPC IMAGE] found '{img_url}' for '{name}'", flush=True)
+                        break
+                if not img_url:
+                    print(f"[UPC IMAGE] no image found for '{name}'", flush=True)
+        except Exception as e:
+            print(f"[UPC IMAGE] error for '{name}': {e}", flush=True)
 
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
