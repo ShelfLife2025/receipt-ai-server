@@ -3073,7 +3073,7 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
 
-        key = dedupe_key(name)
+    key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key)
 
     if not img_url:
@@ -3106,9 +3106,6 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
         _trim_caches_if_needed()
         return Response(content=img_bytes, media_type=ctype)
-        _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
-        _trim_caches_if_needed()
-        return Response(content=img_bytes, media_type=ctype)
 
     tiny_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
@@ -3117,8 +3114,6 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     _IMAGE_CONTENT_TYPE_CACHE[ck] = "image/png"
     _trim_caches_if_needed()
     return Response(content=tiny_bytes, media_type="image/png")
-
-
 def _require_admin(key: Optional[str]) -> None:
     if not ADMIN_KEY:
         raise HTTPException(status_code=500, detail="ADMIN_KEY not set on server")
