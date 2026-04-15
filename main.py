@@ -3080,29 +3080,25 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     if not img_url:
         try:
-            await asyncio.sleep(0.3)
             search_query = urllib.parse.quote(name)
-            upc_url = f"https://api.upcitemdb.com/prod/trial/search?s={search_query}&type=product"
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"Accept": "application/json", "User-Agent": "ShelfLife/1.0"}) as uclient:
-                uresp = await uclient.get(upc_url)
-                if uresp.status_code == 200:
-                    udata = uresp.json()
-                    uitems = udata.get("items", [])
-                    for item in uitems:
-                        images = item.get("images", [])
-                        for candidate in images:
-                            if candidate and candidate.startswith("http"):
-                                img_url = candidate
-                                print(f"[UPC IMAGE] found '{img_url}' for '{name}'", flush=True)
-                                break
-                        if img_url:
+            off_url = f"https://us.openfoodfacts.org/cgi/search.pl?search_terms={search_query}&search_simple=1&action=process&json=1&page_size=3&fields=product_name,image_front_url"
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "ShelfLife/1.0 (contact@shelflife.app)"}) as oclient:
+                oresp = await oclient.get(off_url)
+                if oresp.status_code == 200:
+                    odata = oresp.json()
+                    oproducts = odata.get("products", [])
+                    for product in oproducts:
+                        candidate = product.get("image_front_url") or product.get("image_url")
+                        if candidate and candidate.startswith("http"):
+                            img_url = candidate
+                            print(f"[OFF IMAGE] found '{img_url}' for '{name}'", flush=True)
                             break
                     if not img_url:
-                        print(f"[UPC IMAGE] no image found for '{name}' status={uresp.status_code}", flush=True)
+                        print(f"[OFF IMAGE] no image found for '{name}'", flush=True)
                 else:
-                    print(f"[UPC IMAGE] rate limited or error for '{name}' status={uresp.status_code}", flush=True)
+                    print(f"[OFF IMAGE] error for '{name}' status={oresp.status_code}", flush=True)
         except Exception as e:
-            print(f"[UPC IMAGE] error for '{name}': {e}", flush=True)
+            print(f"[OFF IMAGE] error for '{name}': {e}", flush=True)
 
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
