@@ -271,6 +271,11 @@ Respond with ONLY a valid JSON array, no markdown."""
 PACKSHOT_SERVICE_URL = (os.getenv("PACKSHOT_SERVICE_URL") or "").strip().rstrip("/")
 PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
 
+KROGER_CLIENT_ID = (os.getenv("KROGER_CLIENT_ID") or "").strip()
+KROGER_CLIENT_SECRET = (os.getenv("KROGER_CLIENT_SECRET") or "").strip()
+_kroger_token: Optional[str] = None
+_kroger_token_expiry: float = 0.0
+
 INSTACART_PRODUCTS_LINK_URL = (
     os.getenv("INSTACART_PRODUCTS_LINK_URL") or "https://connect.instacart.com/idp/v1/products/products_link"
 ).strip()
@@ -3043,6 +3048,75 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
     return {"url": link}
 
 
+async def _kroger_get_token() -> Optional[str]:
+    global _kroger_token, _kroger_token_expiry
+    if not KROGER_CLIENT_ID or not KROGER_CLIENT_SECRET:
+        return None
+    if _kroger_token and time.time() < _kroger_token_expiry:
+        return _kroger_token
+    try:
+        import base64 as _b64
+        creds = _b64.b64encode(f"{KROGER_CLIENT_ID}:{KROGER_CLIENT_SECRET}".encode()).decode()
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.post(
+                "https://api.kroger.com/v1/connect/oauth2/token",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": f"Basic {creds}",
+                },
+                data="grant_type=client_credentials&scope=product.compact",
+            )
+            if r.status_code == 200:
+                data = r.json()
+                _kroger_token = data.get("access_token")
+                expires_in = int(data.get("expires_in", 1800))
+                _kroger_token_expiry = time.time() + expires_in - 60
+                print(f"[KROGER] got token, expires in {expires_in}s", flush=True)
+                return _kroger_token
+            else:
+                print(f"[KROGER] token error status={r.status_code} body={r.text}", flush=True)
+                return None
+    except Exception as e:
+        print(f"[KROGER] token exception: {e}", flush=True)
+        return None
+
+
+async def _kroger_image(name: str) -> Optional[str]:
+    token = await _kroger_get_token()
+    if not token:
+        return None
+    try:
+        search_term = urllib.parse.quote(name)
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            r = await client.get(
+                f"https://api.kroger.com/v1/products?filter.term={search_term}&filter.limit=1",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+            )
+            if r.status_code == 200:
+                data = r.json()
+                products = data.get("data", [])
+                if products:
+                    images = products[0].get("images", [])
+                    for img in images:
+                        sizes = img.get("sizes", [])
+                        for sz in sizes:
+                            url = sz.get("url", "")
+                            if url and url.startswith("http"):
+                                print(f"[KROGER] found image for '{name}': {url}", flush=True)
+                                return url
+                print(f"[KROGER] no image found for '{name}'", flush=True)
+                return None
+            else:
+                print(f"[KROGER] search error status={r.status_code} for '{name}'", flush=True)
+                return None
+    except Exception as e:
+        print(f"[KROGER] search exception for '{name}': {e}", flush=True)
+        return None
+
+
 @app.get("/image")
 async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(None), product_id: Optional[str] = Query(None)):
     ck = _cache_key(name, upc, product_id)
@@ -3080,25 +3154,9 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     if not img_url:
         try:
-            search_query = urllib.parse.quote(name)
-            off_url = f"https://us.openfoodfacts.org/cgi/search.pl?search_terms={search_query}&search_simple=1&action=process&json=1&page_size=3&fields=product_name,image_front_url"
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "ShelfLife/1.0 (contact@shelflife.app)"}) as oclient:
-                oresp = await oclient.get(off_url)
-                if oresp.status_code == 200:
-                    odata = oresp.json()
-                    oproducts = odata.get("products", [])
-                    for product in oproducts:
-                        candidate = product.get("image_front_url") or product.get("image_url")
-                        if candidate and candidate.startswith("http"):
-                            img_url = candidate
-                            print(f"[OFF IMAGE] found '{img_url}' for '{name}'", flush=True)
-                            break
-                    if not img_url:
-                        print(f"[OFF IMAGE] no image found for '{name}'", flush=True)
-                else:
-                    print(f"[OFF IMAGE] error for '{name}' status={oresp.status_code}", flush=True)
+            img_url = await _kroger_image(name)
         except Exception as e:
-            print(f"[OFF IMAGE] error for '{name}': {e}", flush=True)
+            print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
 
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
