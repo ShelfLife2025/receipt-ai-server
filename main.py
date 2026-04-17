@@ -155,11 +155,18 @@ _ai_enrichment_cache: Dict[str, Dict] = {}
 
 def _fallback_for_item(name: str) -> Dict:
     name_lower = name.lower().strip()
+    # Exact match first
     if name_lower in FOOD_KNOWLEDGE_FALLBACK:
         return FOOD_KNOWLEDGE_FALLBACK[name_lower].copy()
+    # Find ALL keys that appear in the item name, then pick the longest (most specific) match
+    best_key = None
+    best_len = 0
     for key in FOOD_KNOWLEDGE_FALLBACK:
-        if key in name_lower:
-            return FOOD_KNOWLEDGE_FALLBACK[key].copy()
+        if key in name_lower and len(key) > best_len:
+            best_key = key
+            best_len = len(key)
+    if best_key:
+        return FOOD_KNOWLEDGE_FALLBACK[best_key].copy()
     return {"expires_in_days": 14, "storage": "fridge", "category": "Food"}
 
 async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
