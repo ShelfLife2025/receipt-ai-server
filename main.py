@@ -194,7 +194,7 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
             [{"name": it["name"], "category": it["category"]} for it in uncached_items],
             indent=2
         )
-        prompt = f"""You are an expert grocery store assistant. For each item below, return a JSON array in the same order as the input.
+        prompt = f"""You are an expert food scientist and grocery store assistant. For each item below, return a JSON array in the same order as the input.
 
 For each item return these 4 fields:
 - full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand all abbreviations. Example: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon". If the name is already clean, return it as-is.
@@ -202,7 +202,113 @@ For each item return these 4 fields:
 - storage: one of "fridge", "freezer", or "pantry"
 - category: either "Food" or "Household"
 
-Reference for expires_in_days: raw chicken/fish=2d fridge, ground beef=2d fridge, fresh pasta=3d fridge, milk=7d fridge, bacon=7d fridge, bread=5d pantry, eggs=21d fridge, butter=30d fridge, hard cheese=30d fridge, frozen meat=270d freezer, chips/crackers=60d pantry, canned goods=730d pantry, dry pasta/rice=730d pantry, laundry/household=730d pantry, sugar/salt=3650d pantry.
+SHELF LIFE REFERENCE — use the most specific match for the item:
+
+CHEESE (be very specific by type):
+- Fresh mozzarella, burrata, ricotta = 5d fridge
+- Brie, camembert, soft-ripened = 7d fridge
+- Cream cheese, mascarpone = 10d fridge
+- Shredded mozzarella, shredded cheese blends = 14d fridge
+- Sliced American, provolone, muenster, swiss = 14d fridge
+- Cheddar block, colby, monterey jack = 30d fridge
+- Parmesan (shredded or grated), romano, asiago = 60d fridge
+- Parmesan (wedge/block), aged gouda, aged cheddar = 90d fridge
+
+MEAT & SEAFOOD:
+- Raw chicken, turkey, fish, shrimp, scallops = 2d fridge
+- Raw ground beef, ground turkey, ground pork = 2d fridge
+- Raw steak, pork chops, roasts = 3d fridge
+- Bacon, pancetta = 7d fridge
+- Deli meat (opened), hot dogs (opened) = 5d fridge
+- Cooked chicken, cooked meat = 4d fridge
+- Frozen chicken, turkey = 270d freezer
+- Frozen beef, pork = 180d freezer
+- Frozen fish, shrimp = 180d freezer
+
+DAIRY:
+- Whole milk, 2%, skim, buttermilk = 7d fridge
+- Oat milk, almond milk, soy milk (opened) = 7d fridge
+- Heavy cream, half-and-half, whipping cream = 10d fridge
+- Sour cream, cottage cheese = 14d fridge
+- Greek yogurt, regular yogurt = 14d fridge
+- Butter (salted) = 30d fridge
+- Butter (unsalted) = 14d fridge
+- Eggs = 21d fridge
+
+PRODUCE - FRUIT:
+- Strawberries, raspberries, blackberries = 3d fridge
+- Blueberries = 7d fridge
+- Grapes, cherries = 5d fridge
+- Ripe bananas = 3d pantry, unripe bananas = 7d pantry
+- Apples = 21d fridge
+- Oranges, grapefruits, lemons, limes = 14d fridge
+- Avocado (ripe) = 2d pantry, avocado (unripe) = 5d pantry
+- Peaches, plums, nectarines (ripe) = 3d fridge
+- Mango (ripe) = 3d fridge
+- Pineapple (whole) = 5d pantry
+- Watermelon (whole) = 10d pantry
+
+PRODUCE - VEGETABLES:
+- Spinach, arugula, mixed greens = 5d fridge
+- Lettuce (head), romaine = 7d fridge
+- Broccoli, cauliflower, brussels sprouts = 5d fridge
+- Mushrooms = 5d fridge
+- Asparagus = 3d fridge
+- Zucchini, summer squash = 5d fridge
+- Bell peppers = 7d fridge
+- Cucumber = 7d fridge
+- Tomatoes (ripe) = 5d pantry
+- Corn on the cob = 2d fridge
+- Green beans, snap peas = 5d fridge
+- Carrots (baby or whole) = 21d fridge
+- Celery = 14d fridge
+- Onions, shallots = 30d pantry
+- Garlic (whole head) = 90d pantry
+- Potatoes (russet, yukon gold) = 30d pantry
+- Sweet potatoes = 21d pantry
+- Cabbage, kale = 14d fridge
+
+BREAD & BAKERY:
+- Sliced sandwich bread = 5d pantry
+- Bagels, English muffins = 5d pantry
+- Tortillas (flour or corn) = 7d pantry
+- Dinner rolls, hamburger buns = 5d pantry
+- Pita bread = 5d pantry
+- Croissants, pastries = 2d pantry
+
+PANTRY / DRY GOODS:
+- Dry pasta, rice, quinoa, oats = 730d pantry
+- Canned beans, canned vegetables = 730d pantry
+- Canned soup, broth = 730d pantry
+- Canned tuna, canned salmon = 1095d pantry
+- Chips, pretzels = 60d pantry
+- Crackers, cookies = 90d pantry
+- Cereal = 180d pantry
+- Peanut butter, almond butter = 180d pantry
+- Olive oil, vegetable oil = 365d pantry
+- Flour = 365d pantry
+- Sugar, salt = 3650d pantry
+- Honey = 3650d pantry
+- Coffee (whole bean or ground, sealed) = 180d pantry
+- Spices = 730d pantry
+
+FROZEN:
+- Frozen pizza = 180d freezer
+- Frozen vegetables, frozen fruit = 365d freezer
+- Ice cream, frozen yogurt = 180d freezer
+- Frozen meals, frozen burritos = 180d freezer
+
+BEVERAGES:
+- Orange juice, apple juice (opened) = 7d fridge
+- Soda (unopened cans/bottles) = 270d pantry
+- Wine (opened) = 3d pantry
+- Beer (unopened) = 180d pantry
+
+HOUSEHOLD (non-food):
+- Cleaning products, laundry detergent, dish soap = 730d pantry
+- Paper products (towels, toilet paper, napkins) = 3650d pantry
+- Personal care (shampoo, toothpaste, deodorant) = 730d pantry
+- Cat litter, pet supplies = 730d pantry
 
 Items:
 {items_json}
