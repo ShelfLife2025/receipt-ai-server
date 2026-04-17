@@ -189,6 +189,7 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
     uncached_items = [items[i] for i in uncached_indices]
     gemini_succeeded = False
 
+    print(f"[GEMINI] KEY present={bool(GEMINI_API_KEY)} key_preview={str(GEMINI_API_KEY)[:8] if GEMINI_API_KEY else 'MISSING'}", flush=True)
     if GEMINI_API_KEY:
         print(f"[GEMINI] Starting enrichment for {len(uncached_items)} items: {[it['name'] for it in uncached_items]}", flush=True)
         items_json = json.dumps(
