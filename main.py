@@ -3158,6 +3158,29 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception as e:
             print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
 
+    # Fallback: if Kroger had nothing, try Open Food Facts
+    if not img_url:
+        try:
+            search_query = urllib.parse.quote(name)
+            off_url = f"https://us.openfoodfacts.org/cgi/search.pl?search_terms={search_query}&search_simple=1&action=process&json=1&page_size=3&fields=product_name,image_front_url"
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "ShelfLife/1.0 (contact@shelflife.app)"}) as oclient:
+                oresp = await oclient.get(off_url)
+                if oresp.status_code == 200:
+                    odata = oresp.json()
+                    oproducts = odata.get("products", [])
+                    for product in oproducts:
+                        candidate = product.get("image_front_url") or product.get("image_url")
+                        if candidate and candidate.startswith("http"):
+                            img_url = candidate
+                            print(f"[OFF FALLBACK] found image for '{name}'", flush=True)
+                            break
+                    if not img_url:
+                        print(f"[OFF FALLBACK] no image found for '{name}'", flush=True)
+                else:
+                    print(f"[OFF FALLBACK] error for '{name}' status={oresp.status_code}", flush=True)
+        except Exception as e:
+            print(f"[OFF FALLBACK] error for '{name}': {e}", flush=True)
+
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
 
