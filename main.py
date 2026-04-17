@@ -190,6 +190,7 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
     gemini_succeeded = False
 
     if GEMINI_API_KEY:
+        print(f"[GEMINI] Starting enrichment for {len(uncached_items)} items: {[it['name'] for it in uncached_items]}", flush=True)
         items_json = json.dumps(
             [{"name": it["name"], "category": it["category"]} for it in uncached_items],
             indent=2
@@ -360,13 +361,15 @@ Respond with ONLY a valid JSON array, no markdown."""
                     _ai_enrichment_cache[key] = enrichment
                     results[uncached_indices[j]] = enrichment.copy()
 
+                print(f"[GEMINI] Success with {model_name} — results: {[(it['name'], r.get('expires_in_days'), r.get('storage')) for it, r in zip(uncached_items, gemini_results)]}", flush=True)
                 gemini_succeeded = True
                 break
             except Exception as exc:
-                print(f"[ai_enrichment] {model_name} failed: {exc}")
+                print(f"[GEMINI] {model_name} failed: {exc}", flush=True)
                 continue
 
     if not gemini_succeeded:
+        print(f"[GEMINI] All models failed — using fallback dictionary", flush=True)
         for j, i in enumerate(uncached_indices):
             key = items[i]["name"].lower().strip()
             enrichment = _fallback_for_item(items[i]["name"])
