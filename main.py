@@ -316,8 +316,9 @@ Items:
 
 Respond with ONLY a valid JSON array, no markdown."""
 
-        for model_name in ("gemini-2.0-flash-lite", "gemini-1.5-flash"):
+        for model_name in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"):
             try:
+                print(f"[GEMINI] Trying model: {model_name}", flush=True)
                 model = genai.GenerativeModel(model_name)
                 response = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: model.generate_content(prompt)
