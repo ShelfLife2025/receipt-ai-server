@@ -317,7 +317,7 @@ Items:
 
 Respond with ONLY a valid JSON array, no markdown."""
 
-        for model_name in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"):
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-001"):
             try:
                 print(f"[GEMINI] Trying model: {model_name}", flush=True)
                 model = genai.GenerativeModel(model_name)
