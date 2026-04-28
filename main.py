@@ -199,7 +199,7 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
         prompt = f"""You are an expert food scientist and grocery store assistant. For each item below, return a JSON array in the same order as the input.
 
 For each item return these 4 fields:
-- full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand all abbreviations. Example: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon". If the name is already clean, return it as-is.
+- full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand all abbreviations including brand abbreviations. Example: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon", "SBR BUFF WG MARIND" -> "Sweet Baby Ray's Buffalo Wing Marinade", "KH PRETZEL BUNS" -> "King's Hawaiian Pretzel Buns", "PBX PARMESAN WEDGE" -> "Publix Parmesan Wedge", "FRSH STP XTRM ODOR" -> "Fresh Step Extreme Odor Control Cat Litter", "KH SAVORY DIN ROLL" -> "King's Hawaiian Savory Dinner Rolls". If the name is already clean, return it as-is.
 - expires_in_days: integer number of days until expiration from purchase
 - storage: one of "fridge", "freezer", or "pantry"
 - category: either "Food" or "Household"
