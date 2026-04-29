@@ -3506,6 +3506,116 @@ Only return the JSON array. No markdown, no explanation, no code blocks."""
 
     return suggestions
 
+
+
+# ---------------------------------------------------------------------------
+# /recipe-detail  — Gemini generates full recipe for a given meal name
+# ---------------------------------------------------------------------------
+class RecipeDetailRequest(BaseModel):
+    title: str          # meal name e.g. "Chicken Stir Fry"
+    description: str = ""
+
+class RecipeDetailResponse(BaseModel):
+    title: str
+    description: str
+    prep_time: str
+    cook_time: str
+    servings: str
+    ingredients: List[str]
+    instructions: List[str]
+    photo_url: Optional[str] = None
+
+@app.post("/recipe-detail")
+@app.post("/recipe-detail/")
+async def recipe_detail(req: RecipeDetailRequest) -> RecipeDetailResponse:
+    prompt = f"""You are a professional chef writing a clear, easy-to-follow recipe.
+
+Write a complete recipe for: {req.title}
+
+Return ONLY a valid JSON object with these exact fields:
+- "title": the meal name
+- "description": one appealing sentence about the dish
+- "prep_time": preparation time as a string (e.g. "10 minutes")
+- "cook_time": cooking time as a string (e.g. "20 minutes")
+- "servings": number of servings as a string (e.g. "4 servings")
+- "ingredients": array of strings, each one ingredient with amount (e.g. "2 chicken breasts", "1 cup rice", "3 cloves garlic")
+- "instructions": array of strings, each one clear numbered step (do NOT include the number, just the instruction text)
+
+Example format:
+{{
+  "title": "Chicken Stir Fry",
+  "description": "A quick and flavorful stir fry with tender chicken and crisp vegetables.",
+  "prep_time": "10 minutes",
+  "cook_time": "15 minutes",
+  "servings": "4 servings",
+  "ingredients": ["2 chicken breasts, sliced thin", "1 cup broccoli florets", "2 tbsp soy sauce"],
+  "instructions": ["Heat oil in a large wok over high heat.", "Add chicken and cook until golden, about 5 minutes.", "Add vegetables and stir fry for 3 more minutes."]
+}}
+
+Only return the JSON object. No markdown, no explanation, no code blocks."""
+
+    fallback = RecipeDetailResponse(
+        title=req.title,
+        description=req.description,
+        prep_time="",
+        cook_time="",
+        servings="",
+        ingredients=[],
+        instructions=[]
+    )
+
+    if not GEMINI_API_KEY:
+        return fallback
+
+    try:
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash-lite"):
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                raw = response.text.strip()
+                raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.IGNORECASE)
+                raw = re.sub(r"\n?```$", "", raw, flags=re.IGNORECASE)
+                raw = raw.strip()
+                parsed = json.loads(raw)
+
+                # Fetch photo from Spoonacular
+                photo_url = None
+                try:
+                    spoon_key = "648b818a80d841a7907a7860637bb087"
+                    async with httpx.AsyncClient(timeout=5) as client:
+                        r = await client.get(
+                            "https://api.spoonacular.com/recipes/complexSearch",
+                            params={"query": req.title, "number": 1, "apiKey": spoon_key}
+                        )
+                        data = r.json()
+                        results = data.get("results", [])
+                        if results and results[0].get("image"):
+                            photo_url = results[0]["image"]
+                except Exception:
+                    pass
+
+                print(f"[RECIPE-DETAIL] {model_name} generated recipe for: {req.title}", flush=True)
+
+                return RecipeDetailResponse(
+                    title=parsed.get("title", req.title),
+                    description=parsed.get("description", req.description),
+                    prep_time=parsed.get("prep_time", ""),
+                    cook_time=parsed.get("cook_time", ""),
+                    servings=parsed.get("servings", ""),
+                    ingredients=[str(i) for i in parsed.get("ingredients", [])],
+                    instructions=[str(s) for s in parsed.get("instructions", [])],
+                    photo_url=photo_url
+                )
+
+            except Exception as exc:
+                print(f"[RECIPE-DETAIL] {model_name} failed: {exc}", flush=True)
+                continue
+
+    except Exception as exc:
+        print(f"[RECIPE-DETAIL] Fatal error: {exc}", flush=True)
+
+    return fallback
+
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
     try:
