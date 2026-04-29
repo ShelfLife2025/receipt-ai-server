@@ -3398,6 +3398,114 @@ async def admin_feedback(body: FeedbackBody, key: Optional[str] = Query(None)):
     return {"ok": True, "learned_map_entries": len(_LEARNED_MAP)}
 
 
+
+
+# ---------------------------------------------------------------------------
+# /suggest-meals  — Gemini-powered meal suggestions based on pantry items
+# ---------------------------------------------------------------------------
+class SuggestMealsRequest(BaseModel):
+    ingredients: List[str]          # food item names from the user's pantry
+    slot: str                       # "breakfast", "lunch", or "dinner"
+    count: int = 8                  # how many suggestions to return
+
+class MealSuggestion(BaseModel):
+    title: str
+    description: str
+    missing: List[str]              # ingredients needed but not in pantry
+    photo_url: Optional[str] = None
+
+@app.post("/suggest-meals")
+@app.post("/suggest-meals/")
+async def suggest_meals(req: SuggestMealsRequest) -> List[MealSuggestion]:
+    slot = req.slot.lower().strip()
+    if slot not in ("breakfast", "lunch", "dinner"):
+        slot = "dinner"
+
+    ingredients_text = ", ".join(req.ingredients) if req.ingredients else "various pantry staples"
+
+    prompt = f"""You are a helpful meal planning assistant.
+
+The user has these ingredients available: {ingredients_text}
+
+Suggest exactly {req.count} {slot} meal ideas. Prioritize meals the user can make with what they already have.
+If a meal needs 1-3 extra ingredients, that is okay — list them clearly.
+Do NOT suggest meals that need more than 3 ingredients the user doesn't have.
+
+Return ONLY a valid JSON array with exactly {req.count} objects. Each object must have:
+- "title": short meal name (e.g. "Scrambled Eggs with Toast")
+- "description": one sentence description (e.g. "A simple and filling breakfast ready in 10 minutes")
+- "missing": array of ingredient names the user needs to buy (empty array if they have everything)
+
+Example format:
+[
+  {{"title": "Chicken Stir Fry", "description": "Quick and tasty stir fry with vegetables over rice.", "missing": []}},
+  {{"title": "Pasta Primavera", "description": "Light pasta with fresh vegetables in olive oil.", "missing": ["pasta", "zucchini"]}}
+]
+
+Only return the JSON array. No markdown, no explanation, no code blocks."""
+
+    suggestions: List[MealSuggestion] = []
+
+    if not GEMINI_API_KEY:
+        return suggestions
+
+    try:
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash-lite"):
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                raw = response.text.strip()
+                # Strip markdown code fences if present
+                raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.IGNORECASE)
+                raw = re.sub(r"\n?```$", "", raw, flags=re.IGNORECASE)
+                raw = raw.strip()
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    continue
+
+                # Build suggestions — fetch photo from Spoonacular for each
+                spoon_key = "648b818a80d841a7907a7860637bb087"
+                async def fetch_photo(title: str) -> Optional[str]:
+                    try:
+                        url = "https://api.spoonacular.com/recipes/complexSearch"
+                        params = {"query": title, "number": 1, "apiKey": spoon_key}
+                        async with httpx.AsyncClient(timeout=5) as client:
+                            r = await client.get(url, params=params)
+                            data = r.json()
+                            results = data.get("results", [])
+                            if results and results[0].get("image"):
+                                return results[0]["image"]
+                    except Exception:
+                        pass
+                    return None
+
+                photo_tasks = [fetch_photo(item.get("title", "")) for item in parsed]
+                photos = await asyncio.gather(*photo_tasks)
+
+                for item, photo in zip(parsed, photos):
+                    title = (item.get("title") or "").strip()
+                    description = (item.get("description") or "").strip()
+                    missing = [m.strip() for m in (item.get("missing") or []) if m.strip()]
+                    if title:
+                        suggestions.append(MealSuggestion(
+                            title=title,
+                            description=description,
+                            missing=missing,
+                            photo_url=photo
+                        ))
+
+                print(f"[SUGGEST-MEALS] {model_name} returned {len(suggestions)} {slot} suggestions", flush=True)
+                break
+
+            except Exception as exc:
+                print(f"[SUGGEST-MEALS] {model_name} failed: {exc}", flush=True)
+                continue
+
+    except Exception as exc:
+        print(f"[SUGGEST-MEALS] Fatal error: {exc}", flush=True)
+
+    return suggestions
+
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
     try:
