@@ -65,100 +65,412 @@ if GEMINI_API_KEY:
 
 VISION_TMP_PATH = "/tmp/gcloud_key.json"
 FOOD_KNOWLEDGE_FALLBACK: Dict[str, Dict] = {
-    "chicken breast":    {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
-    "chicken":           {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
-    "ground beef":       {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
-    "beef":              {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
-    "steak":             {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
-    "pork":              {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
-    "bacon":             {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "salmon":            {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
-    "shrimp":            {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
-    "fish":              {"expires_in_days": 2,    "storage": "fridge",   "category": "Food"},
-    "deli meat":         {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
-    "hot dogs":          {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "sausage":           {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
-    "milk":              {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "eggs":              {"expires_in_days": 21,   "storage": "fridge",   "category": "Food"},
-    "butter":            {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
-    "cheese":            {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
-    "cream cheese":      {"expires_in_days": 10,   "storage": "fridge",   "category": "Food"},
-    "sour cream":        {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
-    "yogurt":            {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
-    "heavy cream":       {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "bread":             {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
-    "bagels":            {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
-    "tortillas":         {"expires_in_days": 7,    "storage": "pantry",   "category": "Food"},
-    "garlic bread":      {"expires_in_days": 90,   "storage": "freezer",  "category": "Food"},
-    "apples":            {"expires_in_days": 21,   "storage": "fridge",   "category": "Food"},
-    "bananas":           {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
-    "oranges":           {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
-    "strawberries":      {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
-    "blueberries":       {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "grapes":            {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "lettuce":           {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "spinach":           {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
-    "broccoli":          {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
-    "carrots":           {"expires_in_days": 21,   "storage": "fridge",   "category": "Food"},
-    "tomatoes":          {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
-    "onions":            {"expires_in_days": 30,   "storage": "pantry",   "category": "Food"},
-    "garlic":            {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
-    "potatoes":          {"expires_in_days": 30,   "storage": "pantry",   "category": "Food"},
-    "avocado":           {"expires_in_days": 4,    "storage": "pantry",   "category": "Food"},
-    "mushrooms":         {"expires_in_days": 5,    "storage": "fridge",   "category": "Food"},
-    "ravioli":           {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
-    "fresh pasta":       {"expires_in_days": 3,    "storage": "fridge",   "category": "Food"},
-    "hummus":            {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "salsa":             {"expires_in_days": 14,   "storage": "fridge",   "category": "Food"},
-    "frozen pizza":      {"expires_in_days": 180,  "storage": "freezer",  "category": "Food"},
-    "frozen vegetables": {"expires_in_days": 365,  "storage": "freezer",  "category": "Food"},
-    "ice cream":         {"expires_in_days": 180,  "storage": "freezer",  "category": "Food"},
-    "frozen chicken":    {"expires_in_days": 270,  "storage": "freezer",  "category": "Food"},
-    "canned beans":      {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
-    "canned soup":       {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
-    "canned tuna":       {"expires_in_days": 1095, "storage": "pantry",   "category": "Food"},
-    "pasta":             {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
-    "rice":              {"expires_in_days": 730,  "storage": "pantry",   "category": "Food"},
-    "cereal":            {"expires_in_days": 180,  "storage": "pantry",   "category": "Food"},
-    "crackers":          {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
-    "chips":             {"expires_in_days": 60,   "storage": "pantry",   "category": "Food"},
-    "peanut butter":     {"expires_in_days": 180,  "storage": "pantry",   "category": "Food"},
-    "olive oil":         {"expires_in_days": 365,  "storage": "pantry",   "category": "Food"},
-    "flour":             {"expires_in_days": 365,  "storage": "pantry",   "category": "Food"},
-    "sugar":             {"expires_in_days": 3650, "storage": "pantry",   "category": "Food"},
-    "salt":              {"expires_in_days": 3650, "storage": "pantry",   "category": "Food"},
-    "coffee":            {"expires_in_days": 180,  "storage": "pantry",   "category": "Food"},
-    "juice":             {"expires_in_days": 7,    "storage": "fridge",   "category": "Food"},
-    "paper towels":      {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
-    "toilet paper":      {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
-    "dish soap":         {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "laundry detergent": {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "trash bags":        {"expires_in_days": 3650, "storage": "pantry",   "category": "Household"},
-    "shampoo":           {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "toothpaste":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "tide":              {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "fresh step":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "cat litter":        {"expires_in_days": 730,  "storage": "pantry",   "category": "Household"},
-    "popcorn":           {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
-    "kettle corn":       {"expires_in_days": 90,   "storage": "pantry",   "category": "Food"},
-    "cheddar":           {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
-    "sharp cheddar":     {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
-    "marinade":          {"expires_in_days": 365,  "storage": "pantry",   "category": "Food"},
-    "dinner rolls":      {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
-    "hamburger buns":    {"expires_in_days": 5,    "storage": "pantry",   "category": "Food"},
-    "ranch":             {"expires_in_days": 60,   "storage": "fridge",   "category": "Food"},
-    "vodka":             {"expires_in_days": 3650, "storage": "pantry",   "category": "Food"},
-    "butter":            {"expires_in_days": 30,   "storage": "fridge",   "category": "Food"},
+    # ── MEAT: Raw ──────────────────────────────────────────────────────────────
+    "chicken breast":        {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "chicken thigh":         {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "chicken wings":         {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "chicken drumstick":     {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "whole chicken":         {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "chicken":               {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "turkey":                {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "ground beef":           {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "ground turkey":         {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "ground pork":           {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "ground chicken":        {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "beef":                  {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "steak":                 {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "pork chop":             {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "pork loin":             {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "pork":                  {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "lamb":                  {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "veal":                  {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "ribs":                  {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "roast":                 {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    # ── MEAT: Processed / Cured ───────────────────────────────────────────────
+    "bacon":                 {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "pancetta":              {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "ham":                   {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "prosciutto":            {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "salami":                {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "pepperoni":             {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "deli meat":             {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "lunch meat":            {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "lunchmeat":             {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "deli turkey":           {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "deli ham":              {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "hot dogs":              {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "hot dog":               {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "bratwurst":             {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "sausage":               {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "italian sausage":       {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "chorizo":               {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "rotisserie chicken":    {"expires_in_days": 4,    "storage": "fridge",  "category": "Food"},
+    "cooked chicken":        {"expires_in_days": 4,    "storage": "fridge",  "category": "Food"},
+    # ── SEAFOOD ───────────────────────────────────────────────────────────────
+    "salmon":                {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "tuna steak":            {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "tilapia":               {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "cod":                   {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "halibut":               {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "shrimp":                {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "scallops":              {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "lobster":               {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "crab":                  {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "mussels":               {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "clams":                 {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "fish":                  {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "smoked salmon":         {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "smoked fish":           {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "canned tuna":           {"expires_in_days": 1095, "storage": "pantry",  "category": "Food"},
+    "canned salmon":         {"expires_in_days": 1095, "storage": "pantry",  "category": "Food"},
+    # ── DAIRY ────────────────────────────────────────────────────────────────
+    "whole milk":            {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "skim milk":             {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "2% milk":               {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "milk":                  {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "oat milk":              {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "almond milk":           {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "soy milk":              {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "buttermilk":            {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "heavy cream":           {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "heavy whipping cream":  {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "half and half":         {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "half & half":           {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "whipping cream":        {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "sour cream":            {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "cottage cheese":        {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "greek yogurt":          {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "yogurt":                {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "eggs":                  {"expires_in_days": 21,   "storage": "fridge",  "category": "Food"},
+    "egg":                   {"expires_in_days": 21,   "storage": "fridge",  "category": "Food"},
+    "salted butter":         {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "butter":                {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "unsalted butter":       {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "eggnog":                {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    # ── CHEESE ───────────────────────────────────────────────────────────────
+    "fresh mozzarella":      {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "burrata":               {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "ricotta":               {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "brie":                  {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "camembert":             {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "cream cheese":          {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "mascarpone":            {"expires_in_days": 10,   "storage": "fridge",  "category": "Food"},
+    "shredded mozzarella":   {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "shredded cheese":       {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "mozzarella":            {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "provolone":             {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "swiss cheese":          {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "muenster":              {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "american cheese":       {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "sliced cheese":         {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "cheddar":               {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "sharp cheddar":         {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "colby jack":            {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "monterey jack":         {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "gouda":                 {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "havarti":               {"expires_in_days": 30,   "storage": "fridge",  "category": "Food"},
+    "cheese":                {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "parmesan":              {"expires_in_days": 60,   "storage": "fridge",  "category": "Food"},
+    "romano":                {"expires_in_days": 60,   "storage": "fridge",  "category": "Food"},
+    "asiago":                {"expires_in_days": 60,   "storage": "fridge",  "category": "Food"},
+    "feta":                  {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "blue cheese":           {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    # ── PRODUCE: Fruit ───────────────────────────────────────────────────────
+    "strawberries":          {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "raspberries":           {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "blackberries":          {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "blueberries":           {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "grapes":                {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "cherries":              {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "peaches":               {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "plums":                 {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "nectarines":            {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "mango":                 {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "pineapple":             {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "watermelon":            {"expires_in_days": 10,   "storage": "pantry",  "category": "Food"},
+    "cantaloupe":            {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "honeydew":              {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "apples":                {"expires_in_days": 21,   "storage": "fridge",  "category": "Food"},
+    "apple":                 {"expires_in_days": 21,   "storage": "fridge",  "category": "Food"},
+    "oranges":               {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "orange":                {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "lemons":                {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "limes":                 {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "grapefruit":            {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "avocado":               {"expires_in_days": 4,    "storage": "pantry",  "category": "Food"},
+    "bananas":               {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "banana":                {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    # ── PRODUCE: Vegetables ──────────────────────────────────────────────────
+    "spinach":               {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "arugula":               {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "mixed greens":          {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "salad mix":             {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "spring mix":            {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "lettuce":               {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "romaine":               {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "broccoli":              {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "cauliflower":           {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "brussels sprouts":      {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "asparagus":             {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "mushrooms":             {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "zucchini":              {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "summer squash":         {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "bell pepper":           {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "bell peppers":          {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "cucumber":              {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "green beans":           {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "snap peas":             {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "corn":                  {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "corn on the cob":       {"expires_in_days": 2,    "storage": "fridge",  "category": "Food"},
+    "kale":                  {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "cabbage":               {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "celery":                {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "carrots":               {"expires_in_days": 21,   "storage": "fridge",  "category": "Food"},
+    "baby carrots":          {"expires_in_days": 21,   "storage": "fridge",  "category": "Food"},
+    "tomatoes":              {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "tomato":                {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "cherry tomatoes":       {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "onions":                {"expires_in_days": 30,   "storage": "pantry",  "category": "Food"},
+    "onion":                 {"expires_in_days": 30,   "storage": "pantry",  "category": "Food"},
+    "shallots":              {"expires_in_days": 30,   "storage": "pantry",  "category": "Food"},
+    "garlic":                {"expires_in_days": 90,   "storage": "pantry",  "category": "Food"},
+    "potatoes":              {"expires_in_days": 30,   "storage": "pantry",  "category": "Food"},
+    "potato":                {"expires_in_days": 30,   "storage": "pantry",  "category": "Food"},
+    "sweet potato":          {"expires_in_days": 21,   "storage": "pantry",  "category": "Food"},
+    "sweet potatoes":        {"expires_in_days": 21,   "storage": "pantry",  "category": "Food"},
+    "beets":                 {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "radishes":              {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "eggplant":              {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "artichoke":             {"expires_in_days": 5,    "storage": "fridge",  "category": "Food"},
+    "leeks":                 {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    # ── BREAD & BAKERY ───────────────────────────────────────────────────────
+    "bread":                 {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "sandwich bread":        {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "sourdough":             {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "bagels":                {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "english muffins":       {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "tortillas":             {"expires_in_days": 7,    "storage": "pantry",  "category": "Food"},
+    "flour tortillas":       {"expires_in_days": 7,    "storage": "pantry",  "category": "Food"},
+    "corn tortillas":        {"expires_in_days": 7,    "storage": "pantry",  "category": "Food"},
+    "dinner rolls":          {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "hamburger buns":        {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "hot dog buns":          {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "pita bread":            {"expires_in_days": 5,    "storage": "pantry",  "category": "Food"},
+    "croissants":            {"expires_in_days": 2,    "storage": "pantry",  "category": "Food"},
+    "muffins":               {"expires_in_days": 3,    "storage": "pantry",  "category": "Food"},
+    "donuts":                {"expires_in_days": 2,    "storage": "pantry",  "category": "Food"},
+    "cake":                  {"expires_in_days": 4,    "storage": "pantry",  "category": "Food"},
+    "garlic bread":          {"expires_in_days": 90,   "storage": "freezer", "category": "Food"},
+    # ── PREPARED / FRESH FOODS ───────────────────────────────────────────────
+    "ravioli":               {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "fresh pasta":           {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "gnocchi":               {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "hummus":                {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "guacamole":             {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "salsa":                 {"expires_in_days": 14,   "storage": "fridge",  "category": "Food"},
+    "dips":                  {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "dip":                   {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "pesto":                 {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "pizza dough":           {"expires_in_days": 3,    "storage": "fridge",  "category": "Food"},
+    "soup":                  {"expires_in_days": 4,    "storage": "fridge",  "category": "Food"},
+    "leftovers":             {"expires_in_days": 4,    "storage": "fridge",  "category": "Food"},
+    "tofu":                  {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "tempeh":                {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    # ── FROZEN ───────────────────────────────────────────────────────────────
+    "frozen pizza":          {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen vegetables":     {"expires_in_days": 365,  "storage": "freezer", "category": "Food"},
+    "frozen fruit":          {"expires_in_days": 365,  "storage": "freezer", "category": "Food"},
+    "frozen chicken":        {"expires_in_days": 270,  "storage": "freezer", "category": "Food"},
+    "frozen beef":           {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen shrimp":         {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen fish":           {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen meal":           {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen burrito":        {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen waffles":        {"expires_in_days": 60,   "storage": "freezer", "category": "Food"},
+    "frozen pancakes":       {"expires_in_days": 60,   "storage": "freezer", "category": "Food"},
+    "ice cream":             {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "frozen yogurt":         {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    "ice pops":              {"expires_in_days": 180,  "storage": "freezer", "category": "Food"},
+    # ── PANTRY: Dry Goods ────────────────────────────────────────────────────
+    "pasta":                 {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "spaghetti":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "penne":                 {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "rice":                  {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "white rice":            {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "brown rice":            {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "quinoa":                {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "oats":                  {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "oatmeal":               {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "cereal":                {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "granola":               {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "flour":                 {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "bread crumbs":          {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "cornmeal":              {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "baking powder":         {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "baking soda":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "sugar":                 {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "brown sugar":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "powdered sugar":        {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "salt":                  {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "honey":                 {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "maple syrup":           {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "spices":                {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "pepper":                {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "cinnamon":              {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "cumin":                 {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "paprika":               {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "cayenne":               {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "oregano":               {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "basil":                 {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "thyme":                 {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "rosemary":              {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    # ── PANTRY: Canned / Jarred ──────────────────────────────────────────────
+    "canned beans":          {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "black beans":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "chickpeas":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "lentils":               {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "canned tomatoes":       {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "tomato sauce":          {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "tomato paste":          {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "canned corn":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "canned soup":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "chicken broth":         {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "beef broth":            {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "vegetable broth":       {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "broth":                 {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    # ── PANTRY: Sauces / Condiments ──────────────────────────────────────────
+    "ketchup":               {"expires_in_days": 180,  "storage": "fridge",  "category": "Food"},
+    "mustard":               {"expires_in_days": 365,  "storage": "fridge",  "category": "Food"},
+    "mayonnaise":            {"expires_in_days": 60,   "storage": "fridge",  "category": "Food"},
+    "mayo":                  {"expires_in_days": 60,   "storage": "fridge",  "category": "Food"},
+    "ranch":                 {"expires_in_days": 60,   "storage": "fridge",  "category": "Food"},
+    "hot sauce":             {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "soy sauce":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "worcestershire":        {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "bbq sauce":             {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "buffalo sauce":         {"expires_in_days": 180,  "storage": "fridge",  "category": "Food"},
+    "marinade":              {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "pasta sauce":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "olive oil":             {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "vegetable oil":         {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "coconut oil":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Food"},
+    "vinegar":               {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "salad dressing":        {"expires_in_days": 90,   "storage": "fridge",  "category": "Food"},
+    "pickle":                {"expires_in_days": 90,   "storage": "fridge",  "category": "Food"},
+    "pickles":               {"expires_in_days": 90,   "storage": "fridge",  "category": "Food"},
+    "jam":                   {"expires_in_days": 180,  "storage": "fridge",  "category": "Food"},
+    "jelly":                 {"expires_in_days": 180,  "storage": "fridge",  "category": "Food"},
+    "peanut butter":         {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "almond butter":         {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "nutella":               {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    # ── SNACKS ───────────────────────────────────────────────────────────────
+    "chips":                 {"expires_in_days": 60,   "storage": "pantry",  "category": "Food"},
+    "potato chips":          {"expires_in_days": 60,   "storage": "pantry",  "category": "Food"},
+    "tortilla chips":        {"expires_in_days": 60,   "storage": "pantry",  "category": "Food"},
+    "crackers":              {"expires_in_days": 90,   "storage": "pantry",  "category": "Food"},
+    "pretzels":              {"expires_in_days": 90,   "storage": "pantry",  "category": "Food"},
+    "popcorn":               {"expires_in_days": 90,   "storage": "pantry",  "category": "Food"},
+    "kettle corn":           {"expires_in_days": 90,   "storage": "pantry",  "category": "Food"},
+    "nuts":                  {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "almonds":               {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "cashews":               {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "trail mix":             {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "granola bar":           {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "granola bars":          {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "protein bar":           {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "cookies":               {"expires_in_days": 90,   "storage": "pantry",  "category": "Food"},
+    "candy":                 {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "chocolate":             {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    # ── BEVERAGES ────────────────────────────────────────────────────────────
+    "orange juice":          {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "apple juice":           {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "juice":                 {"expires_in_days": 7,    "storage": "fridge",  "category": "Food"},
+    "soda":                  {"expires_in_days": 270,  "storage": "pantry",  "category": "Food"},
+    "sparkling water":       {"expires_in_days": 270,  "storage": "pantry",  "category": "Food"},
+    "water":                 {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "coffee":                {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "tea":                   {"expires_in_days": 365,  "storage": "pantry",  "category": "Food"},
+    "wine":                  {"expires_in_days": 3,    "storage": "pantry",  "category": "Food"},
+    "beer":                  {"expires_in_days": 180,  "storage": "pantry",  "category": "Food"},
+    "vodka":                 {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "whiskey":               {"expires_in_days": 3650, "storage": "pantry",  "category": "Food"},
+    "sports drink":          {"expires_in_days": 270,  "storage": "pantry",  "category": "Food"},
+    "energy drink":          {"expires_in_days": 270,  "storage": "pantry",  "category": "Food"},
+    # ── HOUSEHOLD ────────────────────────────────────────────────────────────
+    "paper towels":          {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "toilet paper":          {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "napkins":               {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "plastic bags":          {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "trash bags":            {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "aluminum foil":         {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "plastic wrap":          {"expires_in_days": 3650, "storage": "pantry",  "category": "Household"},
+    "dish soap":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "laundry detergent":     {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "fabric softener":       {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "dishwasher pods":       {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "cleaning spray":        {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "bleach":                {"expires_in_days": 365,  "storage": "pantry",  "category": "Household"},
+    "shampoo":               {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "conditioner":           {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "body wash":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "toothpaste":            {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "deodorant":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "hand soap":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "lotion":                {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "sunscreen":             {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "tide":                  {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "fresh step":            {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "cat litter":            {"expires_in_days": 730,  "storage": "pantry",  "category": "Household"},
+    "dog food":              {"expires_in_days": 365,  "storage": "pantry",  "category": "Household"},
+    "cat food":              {"expires_in_days": 365,  "storage": "pantry",  "category": "Household"},
+    "pet food":              {"expires_in_days": 365,  "storage": "pantry",  "category": "Household"},
 }
 
 _ai_enrichment_cache: Dict[str, Dict] = {}
 
-def _fallback_for_item(name: str) -> Dict:
+# ── Keyword overrides: if ANY of these words appear in the item name,
+#    force-apply this shelf life. More specific keys win (longer match).
+_KEYWORD_SHELF_LIFE: Dict[str, Dict] = {
+    # frozen prefix always means freezer
+    "frozen":      {"storage": "freezer", "expires_in_days": 180, "category": "Food"},
+    # canned always means pantry long shelf
+    "canned":      {"storage": "pantry",  "expires_in_days": 730, "category": "Food"},
+    # fresh pasta
+    "fresh pasta": {"storage": "fridge",  "expires_in_days": 3,   "category": "Food"},
+    "fresh herb":  {"storage": "fridge",  "expires_in_days": 7,   "category": "Food"},
+}
+
+def _rules_lookup(name: str) -> Optional[Dict]:
+    """
+    Deterministic shelf-life lookup.
+    1. Check keyword overrides (longest match wins, e.g. 'fresh pasta' beats 'pasta')
+    2. Exact match in FOOD_KNOWLEDGE_FALLBACK
+    3. Longest substring match in FOOD_KNOWLEDGE_FALLBACK
+    Returns None if nothing found.
+    """
     name_lower = name.lower().strip()
-    # Exact match first
+
+    # 1. Keyword overrides — longest key match wins
+    best_kw_key = None
+    best_kw_len = 0
+    for kw in _KEYWORD_SHELF_LIFE:
+        if kw in name_lower and len(kw) > best_kw_len:
+            best_kw_key = kw
+            best_kw_len = len(kw)
+    if best_kw_key:
+        result = _KEYWORD_SHELF_LIFE[best_kw_key].copy()
+        result["is_estimated"] = True
+        result["confidence"] = "medium"
+        return result
+
+    # 2. Exact match
     if name_lower in FOOD_KNOWLEDGE_FALLBACK:
-        return FOOD_KNOWLEDGE_FALLBACK[name_lower].copy()
-    # Find ALL keys that appear in the item name, then pick the longest (most specific) match
+        result = FOOD_KNOWLEDGE_FALLBACK[name_lower].copy()
+        result["is_estimated"] = True
+        result["confidence"] = "high"
+        return result
+
+    # 3. Longest substring match
     best_key = None
     best_len = 0
     for key in FOOD_KNOWLEDGE_FALLBACK:
@@ -166,9 +478,20 @@ def _fallback_for_item(name: str) -> Dict:
             best_key = key
             best_len = len(key)
     if best_key:
-        return FOOD_KNOWLEDGE_FALLBACK[best_key].copy()
-    return {"expires_in_days": 14, "storage": "fridge", "category": "Food"}
+        result = FOOD_KNOWLEDGE_FALLBACK[best_key].copy()
+        result["is_estimated"] = True
+        result["confidence"] = "medium"
+        return result
 
+    return None
+
+def _fallback_for_item(name: str) -> Dict:
+    """Returns shelf life for an item — rules engine first, safe default if unknown."""
+    result = _rules_lookup(name)
+    if result:
+        return result
+    # Unknown item — safe 14-day fridge default
+    return {"expires_in_days": 14, "storage": "fridge", "category": "Food", "is_estimated": True, "confidence": "low"}
 async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
     if not items:
         return []
@@ -354,11 +677,24 @@ Respond with ONLY a valid JSON array, no markdown."""
                     # (e.g. it calls Cremo barber wash "Food"). Our HOUSEHOLD_WORDS list is authoritative.
                     final_name_for_classify = item["name"]
                     our_category = _classify(final_name_for_classify)
+                    # Rules engine is the authority on shelf life — Gemini only provides the clean name
+                    rules = _rules_lookup(final_name_for_classify)
+                    if rules:
+                        shelf_days = rules["expires_in_days"]
+                        shelf_storage = rules["storage"]
+                        shelf_confidence = rules.get("confidence", "medium")
+                    else:
+                        # Fall back to Gemini's estimate only if rules has no match
+                        shelf_days = int(result.get("expires_in_days", 14))
+                        shelf_storage = result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge"
+                        shelf_confidence = "low"
                     enrichment = {
                         "full_name": gemini_full_name or item["name"],
-                        "expires_in_days": int(result.get("expires_in_days", 14)),
-                        "storage": result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge",
+                        "expires_in_days": shelf_days,
+                        "storage": shelf_storage,
                         "category": our_category,
+                        "is_estimated": True,
+                        "confidence": shelf_confidence,
                     }
                     _ai_enrichment_cache[key] = enrichment
                     results[uncached_indices[j]] = enrichment.copy()
