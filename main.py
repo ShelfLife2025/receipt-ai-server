@@ -86,6 +86,9 @@ SHELF_LIFE_DB: Dict[str, Dict] = {
     "steak":                {"fridge": 4,    "freezer": 270,  "pantry": None, "default_storage": "fridge", "category": "Food"},
     "pork chop":            {"fridge": 4,    "freezer": 150,  "pantry": None, "default_storage": "fridge", "category": "Food"},
     "pork loin":            {"fridge": 4,    "freezer": 180,  "pantry": None, "default_storage": "fridge", "category": "Food"},
+    "pulled pork":          {"fridge": 4,    "freezer": 90,   "pantry": None, "default_storage": "fridge", "category": "Food"},
+    "jack daniel's pulled pork": {"fridge": 5, "freezer": 90, "pantry": None, "default_storage": "fridge", "category": "Food"},
+    "jack daniel's pork":   {"fridge": 5,    "freezer": 90,   "pantry": None, "default_storage": "fridge", "category": "Food"},
     "pork":                 {"fridge": 4,    "freezer": 150,  "pantry": None, "default_storage": "fridge", "category": "Food"},
     "lamb":                 {"fridge": 4,    "freezer": 270,  "pantry": None, "default_storage": "fridge", "category": "Food"},
     "veal":                 {"fridge": 4,    "freezer": 270,  "pantry": None, "default_storage": "fridge", "category": "Food"},
@@ -718,9 +721,15 @@ Respond with ONLY a valid JSON array, no markdown."""
                         shelf_confidence = rules.get("confidence", "medium")
                     else:
                         # Fall back to Gemini's estimate only if rules has no match
-                        shelf_days = int(result.get("expires_in_days", 14))
+                        # Cap at 365 days — Gemini occasionally hallucinates huge values
+                        shelf_days = min(int(result.get("expires_in_days", 14)), 365)
                         shelf_storage = result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge"
                         shelf_confidence = "low"
+                    # Build shelf_life_by_storage — use rules if available, else build from shelf_days
+                    if rules:
+                        slbs = rules.get("shelf_life_by_storage", {"fridge": rules.get("expires_in_days"), "freezer": None, "pantry": None})
+                    else:
+                        slbs = {shelf_storage: shelf_days}
                     enrichment = {
                         "full_name": gemini_full_name or item["name"],
                         "expires_in_days": shelf_days,
@@ -728,6 +737,7 @@ Respond with ONLY a valid JSON array, no markdown."""
                         "category": our_category,
                         "is_estimated": True,
                         "confidence": shelf_confidence,
+                        "shelf_life_by_storage": slbs,
                     }
                     _ai_enrichment_cache[key] = enrichment
                     results[uncached_indices[j]] = enrichment.copy()
