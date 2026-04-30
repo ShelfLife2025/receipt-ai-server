@@ -425,8 +425,19 @@ SHELF_LIFE_DB: Dict[str, Dict] = {
     "beer":                 {"fridge": 180,  "freezer": None, "pantry": 180,  "default_storage": "pantry",  "category": "Food"},
     "vodka":                {"fridge": None, "freezer": None, "pantry": 3650, "default_storage": "pantry",  "category": "Food"},
     "whiskey":              {"fridge": None, "freezer": None, "pantry": 3650, "default_storage": "pantry",  "category": "Food"},
-    "sports drink":         {"fridge": None, "freezer": None, "pantry": 270,  "default_storage": "pantry",  "category": "Food"},
-    "energy drink":         {"fridge": None, "freezer": None, "pantry": 270,  "default_storage": "pantry",  "category": "Food"},
+    "sports drink":                  {"fridge": None, "freezer": None, "pantry": 270,  "default_storage": "pantry",  "category": "Food"},
+    "energy drink":                  {"fridge": None, "freezer": None, "pantry": 270,  "default_storage": "pantry",  "category": "Food"},
+    "hard seltzer":                  {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "nutrl vodka seltzer":           {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "nutrl":                         {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "white claw":                    {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "truly hard seltzer":            {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "truly":                         {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "bud light seltzer":             {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "canned cocktail":               {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "hard lemonade":                 {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
+    "brown sugar bacon":             {"fridge": 7,    "freezer": 30,   "pantry": None, "default_storage": "fridge",  "category": "Food"},
+    "great value brown sugar bacon": {"fridge": 7,    "freezer": 30,   "pantry": None, "default_storage": "fridge",  "category": "Food"},
     # ── HOUSEHOLD ────────────────────────────────────────────────────────────
     "paper towels":         {"fridge": None, "freezer": None, "pantry": 3650, "default_storage": "pantry",  "category": "Household"},
     "toilet paper":         {"fridge": None, "freezer": None, "pantry": 3650, "default_storage": "pantry",  "category": "Household"},
@@ -681,6 +692,17 @@ BEVERAGES:
 - Soda (unopened cans/bottles) = 270d pantry
 - Wine (opened) = 3d pantry
 - Beer (unopened) = 180d pantry
+- Hard seltzer (White Claw, Truly, Nutrl, Bud Light Seltzer, etc.) = 365d pantry, fridge=null, freezer=null
+- Canned cocktails, wine coolers, hard lemonade = 365d pantry, fridge=null, freezer=null
+- Liquor (vodka, whiskey, rum, tequila, gin) = 3650d pantry, fridge=null, freezer=null
+
+STRICT RULES — never break these no matter what the item is:
+- NEVER assign pantry days to raw meat, poultry, seafood, deli meat, or fresh dairy
+- NEVER assign more than 7 days fridge to raw chicken, fish, or ground meat
+- NEVER return more than 365 days for any perishable food item
+- If an item is pantry-only (cat litter, detergent, liquor, hard seltzer), set fridge=null and freezer=null
+- If an item is fridge-only (raw meat, most fresh produce), set pantry=null
+- Always return all three storage types (fridge, freezer, pantry) — use null for any that are not safe
 
 HOUSEHOLD (non-food):
 - Cleaning products, laundry detergent, dish soap = 730d pantry
@@ -746,7 +768,25 @@ Respond with ONLY a valid JSON array, no markdown."""
                     if rules:
                         slbs = rules.get("shelf_life_by_storage", {"fridge": rules.get("expires_in_days"), "freezer": None, "pantry": None})
                     else:
-                        slbs = {shelf_storage: shelf_days}
+                        # Build smarter slbs based on what kind of item it is
+                        name_l = final_name_for_classify.lower()
+                        is_meat = any(w in name_l for w in ["chicken","beef","pork","turkey","fish","shrimp","salmon","steak","ground","bacon","deli","sausage","ham","lamb","veal","brisket"])
+                        is_dairy = any(w in name_l for w in ["milk","cream","yogurt","butter","cheese","kefir","half-and-half"])
+                        is_pantry_only = any(w in name_l for w in ["seltzer","litter","detergent","vodka","whiskey","rum","tequila","gin","liquor","cleaner","soap","shampoo","white claw","truly","nutrl","hard lemonade"])
+                        if shelf_storage == "fridge":
+                            if is_meat:
+                                slbs = {"fridge": shelf_days, "freezer": min(shelf_days * 30, 365), "pantry": None}
+                            elif is_dairy:
+                                slbs = {"fridge": shelf_days, "freezer": None, "pantry": None}
+                            else:
+                                slbs = {"fridge": shelf_days, "freezer": min(shelf_days * 3, 365), "pantry": None}
+                        elif shelf_storage == "freezer":
+                            slbs = {"fridge": None, "freezer": shelf_days, "pantry": None}
+                        else:  # pantry
+                            if is_pantry_only:
+                                slbs = {"fridge": None, "freezer": None, "pantry": shelf_days}
+                            else:
+                                slbs = {"fridge": None, "freezer": None, "pantry": shelf_days}
                     enrichment = {
                         "full_name": gemini_full_name or item["name"],
                         "expires_in_days": shelf_days,
