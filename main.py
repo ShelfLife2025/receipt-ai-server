@@ -1461,6 +1461,7 @@ class ParsedItem(BaseModel):
     image_url: str
     expires_in_days: Optional[int] = None
     storage: Optional[str] = None
+    shelf_life_by_storage: Optional[Dict[str, Optional[int]]] = None
 
 
 class InstacartLineItem(BaseModel):
@@ -3317,6 +3318,7 @@ async def parse_receipt(
         for it, info in zip(items, enriched):
             it["expires_in_days"] = info.get("expires_in_days")
             it["storage"] = info.get("storage")
+            it["shelf_life_by_storage"] = info.get("shelf_life_by_storage")
             if info.get("category"):
                 it["category"] = info["category"]
             # Apply Gemini's full name if available
