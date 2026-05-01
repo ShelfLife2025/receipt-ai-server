@@ -3653,8 +3653,17 @@ async def _spoonacular_image(name: str) -> Optional[str]:
                 for product in products:
                     img = product.get("image", "")
                     if img and img.startswith("http"):
-                        print(f"[SPOONACULAR] found image for '{name}': {img}", flush=True)
-                        return img
+                        # Verify the image URL is actually reachable before returning
+                        try:
+                            async with httpx.AsyncClient(timeout=5.0) as vc:
+                                vr = await vc.head(img)
+                                if vr.status_code == 200:
+                                    print(f"[SPOONACULAR] found image for '{name}': {img}", flush=True)
+                                    return img
+                                else:
+                                    print(f"[SPOONACULAR] image 404 for '{name}', skipping", flush=True)
+                        except Exception:
+                            pass
                 print(f"[SPOONACULAR] no image found for '{name}'", flush=True)
             else:
                 print(f"[SPOONACULAR] error for '{name}' status={resp.status_code}", flush=True)
@@ -3740,12 +3749,41 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception as e:
             print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
 
+    # If no image and name starts with a store brand, try stripping the brand and retrying Kroger
+    if not img_url:
+        store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value ", "store brand "]
+        stripped_name = name.lower()
+        for brand in store_brands:
+            if stripped_name.startswith(brand):
+                stripped = name[len(brand):].strip()
+                if stripped:
+                    print(f"[BRAND STRIP] retrying without brand prefix: '{stripped}'", flush=True)
+                    try:
+                        img_url = await _kroger_image(stripped)
+                    except Exception:
+                        pass
+                break
+
     # Fallback: try Spoonacular product search
     if not img_url:
         try:
             img_url = await _spoonacular_image(name)
         except Exception as e:
             print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+
+    # If Spoonacular also failed, try stripped name
+    if not img_url:
+        store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value "]
+        stripped_name = name.lower()
+        for brand in store_brands:
+            if stripped_name.startswith(brand):
+                stripped = name[len(brand):].strip()
+                if stripped:
+                    try:
+                        img_url = await _spoonacular_image(stripped)
+                    except Exception:
+                        pass
+                break
 
     # Fallback: if Kroger and Spoonacular had nothing, try Open Food Facts
     if not img_url:
