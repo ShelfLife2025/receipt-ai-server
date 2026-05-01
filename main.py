@@ -1442,17 +1442,9 @@ _PROTECTED_BRAND_PREFIXES = {
     "fresh step", "tide", "boneless chicken",
 }
 
-PRODUCT_IMAGE_MAP: Dict[str, str] = {
-    "sargento artisan blends parmesan cheese": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
-    "philadelphia cream cheese": "https://images.unsplash.com/photo-1589301763197-9713a1e1e5c0?w=512&q=80",
-    "dr pepper": "https://images.unsplash.com/photo-1621451532593-49f463c06d65?w=512&q=80",
-    "starbucks nespresso pike place roast": "https://images.unsplash.com/photo-1541167760496-1628856ab772?w=512&q=80",
-    "rao's marinara sauce": "https://images.unsplash.com/photo-1611075389455-2f43fa462446?w=512&q=80",
-    "bread": "https://images.unsplash.com/photo-1608198093002-de0e3580bb67?w=512&q=80",
-    "garlic": "https://images.unsplash.com/photo-1506806732259-39c2d0268443?w=512&q=80",
-    "tomatoes": "https://images.unsplash.com/photo-1567306226416-28f0efdc88ce?w=512&q=80",
-    "grapes": "https://images.unsplash.com/photo-1601004890684-d8cbf643f5f2?w=512&q=80",
-}
+# Hardcoded map is intentionally empty — all images now fetched dynamically
+# from Open Food Facts → Kroger → Spoonacular in that order.
+PRODUCT_IMAGE_MAP: Dict[str, str] = {}
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1542838132-92c53300491e?w=512&q=80"
 
 
@@ -3637,6 +3629,65 @@ async def _kroger_get_token() -> Optional[str]:
         return None
 
 
+def _is_good_product_image(url: str) -> bool:
+    """
+    Returns True if the URL looks like a front-of-pack product shot.
+    Rejects URLs that hint at nutrition labels, back-of-pack, or generic lifestyle shots.
+    """
+    if not url:
+        return False
+    url_lower = url.lower()
+    # Reject known bad URL patterns
+    bad_patterns = [
+        "nutrition", "ingredient", "back", "label", "unsplash",  # unsplash = lifestyle/marketing
+        "istockphoto", "shutterstock", "gettyimages", "dreamstime",
+        "alamy", "depositphotos",
+    ]
+    for pat in bad_patterns:
+        if pat in url_lower:
+            return False
+    return True
+
+
+async def _open_food_facts_image(name: str) -> Optional[str]:
+    """Search Open Food Facts for a clean front-of-pack product image."""
+    try:
+        search_query = urllib.parse.quote(name.strip())
+        off_url = (
+            f"https://world.openfoodfacts.org/cgi/search.pl"
+            f"?search_terms={search_query}&search_simple=1&action=process"
+            f"&json=1&page_size=5&fields=product_name,brands,image_front_url,image_url"
+        )
+        async with httpx.AsyncClient(
+            timeout=8.0,
+            follow_redirects=True,
+            headers={"User-Agent": "ShelfLife/1.0 (contact@shelflife.app)"},
+        ) as oclient:
+            oresp = await oclient.get(off_url)
+            if oresp.status_code == 200:
+                odata = oresp.json()
+                products = odata.get("products", [])
+                for product in products:
+                    # Prefer image_front_url — that's the front of the package
+                    candidate = product.get("image_front_url") or product.get("image_url")
+                    if candidate and candidate.startswith("http") and _is_good_product_image(candidate):
+                        # Verify reachable
+                        try:
+                            async with httpx.AsyncClient(timeout=5.0) as vc:
+                                vr = await vc.head(candidate)
+                                if vr.status_code == 200:
+                                    print(f"[OFF] found image for '{name}': {candidate}", flush=True)
+                                    return candidate
+                        except Exception:
+                            pass
+                print(f"[OFF] no usable image found for '{name}'", flush=True)
+            else:
+                print(f"[OFF] error for '{name}' status={oresp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[OFF IMAGE] error for '{name}': {e}", flush=True)
+    return None
+
+
 async def _spoonacular_image(name: str) -> Optional[str]:
     """Search Spoonacular grocery products by name and return image URL."""
     try:
@@ -3644,7 +3695,7 @@ async def _spoonacular_image(name: str) -> Optional[str]:
         if not spoon_key:
             return None
         search_query = urllib.parse.quote(name.strip())
-        url = f"https://api.spoonacular.com/food/products/search?query={search_query}&number=3&apiKey={spoon_key}"
+        url = f"https://api.spoonacular.com/food/products/search?query={search_query}&number=5&apiKey={spoon_key}"
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as sc:
             resp = await sc.get(url)
             if resp.status_code == 200:
@@ -3652,7 +3703,7 @@ async def _spoonacular_image(name: str) -> Optional[str]:
                 products = data.get("products", [])
                 for product in products:
                     img = product.get("image", "")
-                    if img and img.startswith("http"):
+                    if img and img.startswith("http") and _is_good_product_image(img):
                         # Verify the image URL is actually reachable before returning
                         try:
                             async with httpx.AsyncClient(timeout=5.0) as vc:
@@ -3743,28 +3794,56 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key)
 
+    # Helper: strip store brand prefix for retry attempts
+    store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value ",
+                    "good & gather ", "market pantry ", "simple truth ",
+                    "signature select ", "member's mark ", "kirkland ", "store brand "]
+    stripped_name: Optional[str] = None
+    name_lower = name.lower()
+    for brand in store_brands:
+        if name_lower.startswith(brand):
+            candidate_stripped = name[len(brand):].strip()
+            if candidate_stripped:
+                stripped_name = candidate_stripped
+            break
+
+    # ── STEP 1: Open Food Facts (best front-of-pack shots) ───────────────────
+    if not img_url:
+        try:
+            img_url = await _open_food_facts_image(name)
+        except Exception as e:
+            print(f"[OFF IMAGE] error for '{name}': {e}", flush=True)
+
+    # If store brand, retry OFF with stripped name
+    if not img_url and stripped_name:
+        try:
+            print(f"[OFF BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
+            img_url = await _open_food_facts_image(stripped_name)
+        except Exception:
+            pass
+
+    # ── STEP 2: Kroger API ───────────────────────────────────────────────────
     if not img_url:
         try:
             img_url = await _kroger_image(name)
+            # Reject Kroger images that look like nutrition labels / back of pack
+            if img_url and not _is_good_product_image(img_url):
+                print(f"[KROGER] rejected bad image for '{name}': {img_url}", flush=True)
+                img_url = None
         except Exception as e:
             print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
 
-    # If no image and name starts with a store brand, try stripping the brand and retrying Kroger
-    if not img_url:
-        store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value ", "store brand "]
-        stripped_name = name.lower()
-        for brand in store_brands:
-            if stripped_name.startswith(brand):
-                stripped = name[len(brand):].strip()
-                if stripped:
-                    print(f"[BRAND STRIP] retrying without brand prefix: '{stripped}'", flush=True)
-                    try:
-                        img_url = await _kroger_image(stripped)
-                    except Exception:
-                        pass
-                break
+    # If store brand, retry Kroger with stripped name
+    if not img_url and stripped_name:
+        print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
+        try:
+            img_url = await _kroger_image(stripped_name)
+            if img_url and not _is_good_product_image(img_url):
+                img_url = None
+        except Exception:
+            pass
 
-    # Fallback: try Spoonacular product search
+    # ── STEP 3: Spoonacular (last resort — can return wrong products) ────────
     if not img_url:
         try:
             img_url = await _spoonacular_image(name)
@@ -3772,41 +3851,11 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
             print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
 
     # If Spoonacular also failed, try stripped name
-    if not img_url:
-        store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value "]
-        stripped_name = name.lower()
-        for brand in store_brands:
-            if stripped_name.startswith(brand):
-                stripped = name[len(brand):].strip()
-                if stripped:
-                    try:
-                        img_url = await _spoonacular_image(stripped)
-                    except Exception:
-                        pass
-                break
-
-    # Fallback: if Kroger and Spoonacular had nothing, try Open Food Facts
-    if not img_url:
+    if not img_url and stripped_name:
         try:
-            search_query = urllib.parse.quote(name)
-            off_url = f"https://us.openfoodfacts.org/cgi/search.pl?search_terms={search_query}&search_simple=1&action=process&json=1&page_size=3&fields=product_name,image_front_url"
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "ShelfLife/1.0 (contact@shelflife.app)"}) as oclient:
-                oresp = await oclient.get(off_url)
-                if oresp.status_code == 200:
-                    odata = oresp.json()
-                    oproducts = odata.get("products", [])
-                    for product in oproducts:
-                        candidate = product.get("image_front_url") or product.get("image_url")
-                        if candidate and candidate.startswith("http"):
-                            img_url = candidate
-                            print(f"[OFF FALLBACK] found image for '{name}'", flush=True)
-                            break
-                    if not img_url:
-                        print(f"[OFF FALLBACK] no image found for '{name}'", flush=True)
-                else:
-                    print(f"[OFF FALLBACK] error for '{name}' status={oresp.status_code}", flush=True)
-        except Exception as e:
-            print(f"[OFF FALLBACK] error for '{name}': {e}", flush=True)
+            img_url = await _spoonacular_image(stripped_name)
+        except Exception:
+            pass
 
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
