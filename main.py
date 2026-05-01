@@ -3637,6 +3637,32 @@ async def _kroger_get_token() -> Optional[str]:
         return None
 
 
+async def _spoonacular_image(name: str) -> Optional[str]:
+    """Search Spoonacular grocery products by name and return image URL."""
+    try:
+        spoon_key = os.getenv("SPOONACULAR_KEY", "").strip()
+        if not spoon_key:
+            return None
+        search_query = urllib.parse.quote(name.strip())
+        url = f"https://api.spoonacular.com/food/products/search?query={search_query}&number=3&apiKey={spoon_key}"
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as sc:
+            resp = await sc.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                products = data.get("products", [])
+                for product in products:
+                    img = product.get("image", "")
+                    if img and img.startswith("http"):
+                        print(f"[SPOONACULAR] found image for '{name}': {img}", flush=True)
+                        return img
+                print(f"[SPOONACULAR] no image found for '{name}'", flush=True)
+            else:
+                print(f"[SPOONACULAR] error for '{name}' status={resp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+    return None
+
+
 async def _kroger_image(name: str) -> Optional[str]:
     token = await _kroger_get_token()
     if not token:
@@ -3714,7 +3740,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception as e:
             print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
 
-    # Fallback: if Kroger had nothing, try Open Food Facts
+    # Fallback: try Spoonacular product search
+    if not img_url:
+        try:
+            img_url = await _spoonacular_image(name)
+        except Exception as e:
+            print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+
+    # Fallback: if Kroger and Spoonacular had nothing, try Open Food Facts
     if not img_url:
         try:
             search_query = urllib.parse.quote(name)
