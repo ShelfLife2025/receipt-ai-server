@@ -1443,7 +1443,7 @@ _PROTECTED_BRAND_PREFIXES = {
 }
 
 # Hardcoded map is intentionally empty — all images now fetched dynamically
-# from Kroger → Unsplash → Freepik in that order.
+# from Unsplash → Kroger → Freepik in that order.
 PRODUCT_IMAGE_MAP: Dict[str, str] = {}
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1542838132-92c53300491e?w=512&q=80"
 
@@ -3824,28 +3824,7 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                 stripped_name = candidate_stripped
             break
 
-    # ── STEP 1: Kroger API ───────────────────────────────────────────────────
-    if not img_url:
-        try:
-            img_url = await _kroger_image(name)
-            # Reject Kroger images that look like nutrition labels / back of pack
-            if img_url and not _is_good_product_image(img_url):
-                print(f"[KROGER] rejected bad image for '{name}': {img_url}", flush=True)
-                img_url = None
-        except Exception as e:
-            print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
-
-    # If store brand, retry Kroger with stripped name
-    if not img_url and stripped_name:
-        print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
-        try:
-            img_url = await _kroger_image(stripped_name)
-            if img_url and not _is_good_product_image(img_url):
-                img_url = None
-        except Exception:
-            pass
-
-    # ── STEP 3: Unsplash ─────────────────────────────────────────────────────
+    # ── STEP 1: Unsplash (clean keyword-based food photos) ────────────────────
     if not img_url:
         try:
             img_url = await _unsplash_image(name)
@@ -3858,7 +3837,26 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 4: Freepik (last resort) ────────────────────────────────────────
+    # ── STEP 2: Kroger API (packaged goods backup) ──────────────────────────
+    if not img_url:
+        try:
+            img_url = await _kroger_image(name)
+            if img_url and not _is_good_product_image(img_url):
+                print(f"[KROGER] rejected bad image for '{name}': {img_url}", flush=True)
+                img_url = None
+        except Exception as e:
+            print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
+
+    if not img_url and stripped_name:
+        print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
+        try:
+            img_url = await _kroger_image(stripped_name)
+            if img_url and not _is_good_product_image(img_url):
+                img_url = None
+        except Exception:
+            pass
+
+    # ── STEP 3: Freepik (last resort) ────────────────────────────────────────
     if not img_url:
         try:
             img_url = await _freepik_image(name)
