@@ -1443,7 +1443,7 @@ _PROTECTED_BRAND_PREFIXES = {
 }
 
 # Hardcoded map is intentionally empty — all images now fetched dynamically
-# from Open Food Facts → Kroger → Unsplash → Freepik in that order.
+# from Kroger → Unsplash → Freepik in that order.
 PRODUCT_IMAGE_MAP: Dict[str, str] = {}
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1542838132-92c53300491e?w=512&q=80"
 
@@ -3824,22 +3824,7 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                 stripped_name = candidate_stripped
             break
 
-    # ── STEP 1: Open Food Facts (best front-of-pack shots) ───────────────────
-    if not img_url:
-        try:
-            img_url = await _open_food_facts_image(name)
-        except Exception as e:
-            print(f"[OFF IMAGE] error for '{name}': {e}", flush=True)
-
-    # If store brand, retry OFF with stripped name
-    if not img_url and stripped_name:
-        try:
-            print(f"[OFF BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
-            img_url = await _open_food_facts_image(stripped_name)
-        except Exception:
-            pass
-
-    # ── STEP 2: Kroger API ───────────────────────────────────────────────────
+    # ── STEP 1: Kroger API ───────────────────────────────────────────────────
     if not img_url:
         try:
             img_url = await _kroger_image(name)
