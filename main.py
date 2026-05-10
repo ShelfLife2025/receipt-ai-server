@@ -1443,7 +1443,7 @@ _PROTECTED_BRAND_PREFIXES = {
 }
 
 # Hardcoded map is intentionally empty — all images now fetched dynamically
-# from Open Food Facts → Kroger → Spoonacular in that order.
+# from Open Food Facts → Kroger → Unsplash → Freepik in that order.
 PRODUCT_IMAGE_MAP: Dict[str, str] = {}
 FALLBACK_PRODUCT_IMAGE = "https://images.unsplash.com/photo-1542838132-92c53300491e?w=512&q=80"
 
@@ -3639,7 +3639,7 @@ def _is_good_product_image(url: str) -> bool:
     url_lower = url.lower()
     # Reject known bad URL patterns
     bad_patterns = [
-        "nutrition", "ingredient", "back", "label", "unsplash",  # unsplash = lifestyle/marketing
+        "nutrition", "ingredient", "back", "label",
         "istockphoto", "shutterstock", "gettyimages", "dreamstime",
         "alamy", "depositphotos",
     ]
@@ -3688,38 +3688,55 @@ async def _open_food_facts_image(name: str) -> Optional[str]:
     return None
 
 
-async def _spoonacular_image(name: str) -> Optional[str]:
-    """Search Spoonacular grocery products by name and return image URL."""
+async def _unsplash_image(name: str) -> Optional[str]:
+    """Search Unsplash for a product photo by name."""
     try:
-        spoon_key = os.getenv("SPOONACULAR_KEY", "").strip()
-        if not spoon_key:
+        access_key = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
+        if not access_key:
             return None
         search_query = urllib.parse.quote(name.strip())
-        url = f"https://api.spoonacular.com/food/products/search?query={search_query}&number=5&apiKey={spoon_key}"
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as sc:
-            resp = await sc.get(url)
+        url = f"https://api.unsplash.com/search/photos?query={search_query}&per_page=5&orientation=squarish"
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as uc:
+            resp = await uc.get(url, headers={"Authorization": f"Client-ID {access_key}"})
             if resp.status_code == 200:
                 data = resp.json()
-                products = data.get("products", [])
-                for product in products:
-                    img = product.get("image", "")
-                    if img and img.startswith("http") and _is_good_product_image(img):
-                        # Verify the image URL is actually reachable before returning
-                        try:
-                            async with httpx.AsyncClient(timeout=5.0) as vc:
-                                vr = await vc.head(img)
-                                if vr.status_code == 200:
-                                    print(f"[SPOONACULAR] found image for '{name}': {img}", flush=True)
-                                    return img
-                                else:
-                                    print(f"[SPOONACULAR] image 404 for '{name}', skipping", flush=True)
-                        except Exception:
-                            pass
-                print(f"[SPOONACULAR] no image found for '{name}'", flush=True)
+                results = data.get("results", [])
+                for photo in results:
+                    img_url = (photo.get("urls") or {}).get("regular") or (photo.get("urls") or {}).get("small")
+                    if img_url and img_url.startswith("http") and _is_good_product_image(img_url):
+                        print(f"[UNSPLASH] found image for '{name}': {img_url}", flush=True)
+                        return img_url
+                print(f"[UNSPLASH] no usable image found for '{name}'", flush=True)
             else:
-                print(f"[SPOONACULAR] error for '{name}' status={resp.status_code}", flush=True)
+                print(f"[UNSPLASH] error for '{name}' status={resp.status_code}", flush=True)
     except Exception as e:
-        print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+        print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
+    return None
+
+
+async def _freepik_image(name: str) -> Optional[str]:
+    """Search Freepik stock photos by name."""
+    try:
+        api_key = os.getenv("FREEPIK_API_KEY", "").strip()
+        if not api_key:
+            return None
+        search_query = urllib.parse.quote(name.strip())
+        url = f"https://api.freepik.com/v1/resources?term={search_query}&filters[content_type][photo]=1&limit=5&order=relevance"
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as fc:
+            resp = await fc.get(url, headers={"x-freepik-api-key": api_key, "Accept-Language": "en-US"})
+            if resp.status_code == 200:
+                data = resp.json()
+                resources = data.get("data", [])
+                for resource in resources:
+                    img_url = (resource.get("image") or {}).get("source", {}).get("url")
+                    if img_url and img_url.startswith("http") and _is_good_product_image(img_url):
+                        print(f"[FREEPIK] found image for '{name}': {img_url}", flush=True)
+                        return img_url
+                print(f"[FREEPIK] no usable image found for '{name}'", flush=True)
+            else:
+                print(f"[FREEPIK] error for '{name}' status={resp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[FREEPIK IMAGE] error for '{name}': {e}", flush=True)
     return None
 
 
@@ -3843,17 +3860,29 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 3: Spoonacular (last resort — can return wrong products) ────────
+    # ── STEP 3: Unsplash ─────────────────────────────────────────────────────
     if not img_url:
         try:
-            img_url = await _spoonacular_image(name)
+            img_url = await _unsplash_image(name)
         except Exception as e:
-            print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+            print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
 
-    # If Spoonacular also failed, try stripped name
     if not img_url and stripped_name:
         try:
-            img_url = await _spoonacular_image(stripped_name)
+            img_url = await _unsplash_image(stripped_name)
+        except Exception:
+            pass
+
+    # ── STEP 4: Freepik (last resort) ────────────────────────────────────────
+    if not img_url:
+        try:
+            img_url = await _freepik_image(name)
+        except Exception as e:
+            print(f"[FREEPIK IMAGE] error for '{name}': {e}", flush=True)
+
+    if not img_url and stripped_name:
+        try:
+            img_url = await _freepik_image(stripped_name)
         except Exception:
             pass
 
@@ -4021,21 +4050,9 @@ Only return the JSON array. No markdown, no explanation, no code blocks."""
                 if not isinstance(parsed, list):
                     continue
 
-                # Build suggestions — fetch photo from Spoonacular for each
-                spoon_key = "648b818a80d841a7907a7860637bb087"
+                # Build suggestions — fetch photo from Unsplash for each
                 async def fetch_photo(title: str) -> Optional[str]:
-                    try:
-                        url = "https://api.spoonacular.com/recipes/complexSearch"
-                        params = {"query": title, "number": 1, "apiKey": spoon_key}
-                        async with httpx.AsyncClient(timeout=5) as client:
-                            r = await client.get(url, params=params)
-                            data = r.json()
-                            results = data.get("results", [])
-                            if results and results[0].get("image"):
-                                return results[0]["image"]
-                    except Exception:
-                        pass
-                    return None
+                    return await _unsplash_image(title)
 
                 photo_tasks = [fetch_photo(item.get("title", "")) for item in parsed]
                 photos = await asyncio.gather(*photo_tasks)
@@ -4136,19 +4153,10 @@ Only return the JSON object. No markdown, no explanation, no code blocks."""
                 raw = raw.strip()
                 parsed = json.loads(raw)
 
-                # Fetch photo from Spoonacular
+                # Fetch photo from Unsplash
                 photo_url = None
                 try:
-                    spoon_key = "648b818a80d841a7907a7860637bb087"
-                    async with httpx.AsyncClient(timeout=5) as client:
-                        r = await client.get(
-                            "https://api.spoonacular.com/recipes/complexSearch",
-                            params={"query": req.title, "number": 1, "apiKey": spoon_key}
-                        )
-                        data = r.json()
-                        results = data.get("results", [])
-                        if results and results[0].get("image"):
-                            photo_url = results[0]["image"]
+                    photo_url = await _unsplash_image(req.title)
                 except Exception:
                     pass
 
