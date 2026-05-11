@@ -3979,6 +3979,51 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
     return None
 
 
+async def _expand_receipt_name(name: str) -> str:
+    """Use Gemini to expand receipt abbreviations into real product names."""
+    try:
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        if not api_key:
+            return name
+
+        # Only expand if the name looks abbreviated
+        words = name.strip().split()
+        avg_word_len = sum(len(w) for w in words) / max(len(words), 1)
+        looks_abbreviated = (
+            len(name) < 35 or
+            avg_word_len < 4.5 or
+            any(len(w) <= 2 for w in words if w.isalpha())
+        )
+        if not looks_abbreviated:
+            return name
+
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        prompt = (
+            f"This is a grocery receipt item name that may be abbreviated or truncated: \"{name}\"\n"
+            f"Expand it into the full real product name as it would appear on store shelves.\n"
+            f"Rules:\n"
+            f"- Return ONLY the expanded product name, nothing else\n"
+            f"- Keep brand names if present\n"
+            f"- If it's already a clear full name, return it as-is\n"
+            f"- Do not add size, weight, or price info\n"
+            f"- Examples: 'Ck Sl Cookie' -> 'Chocolate Slice Cookie', "
+            f"'Ny Xsh Cheddar' -> 'New York Extra Sharp Cheddar', "
+            f"'Dipped Straw' -> 'Chocolate Dipped Strawberries', "
+            f"'Hvy Whp Crm' -> 'Heavy Whipping Cream', "
+            f"'Buitoni Pes Bas Sauce' -> 'Buitoni Pesto Basil Sauce'\n"
+            f"Expanded name:"
+        )
+        response = model.generate_content(prompt)
+        expanded = response.text.strip().strip('"').strip("'")
+        if expanded and len(expanded) > 2:
+            print(f"[EXPAND NAME] '{name}' -> '{expanded}'", flush=True)
+            return expanded
+        return name
+    except Exception as e:
+        print(f"[EXPAND NAME] error for '{name}': {e}", flush=True)
+        return name
+
+
 async def _google_product_image(name: str) -> Optional[str]:
     """Search Google Custom Search for clean product images from grocery/retail sites."""
     try:
@@ -4137,6 +4182,10 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
             _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
+
+    # ── EXPAND RECEIPT ABBREVIATIONS ──────────────────────────────────────────
+    # Gemini turns "Ck Sl Cookie" into "Chocolate Slice Cookie" before image search
+    name = await _expand_receipt_name(name)
 
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key)
