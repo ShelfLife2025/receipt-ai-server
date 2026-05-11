@@ -847,6 +847,47 @@ _IMAGE_CACHE: Dict[str, bytes] = {}
 _IMAGE_CONTENT_TYPE_CACHE: Dict[str, str] = {}
 _MAX_CACHE_ITEMS = 2000
 
+# Persistent URL cache — survives server restarts
+_PERSISTENT_IMAGE_URL_CACHE: Dict[str, str] = {}
+_PERSISTENT_CACHE_PATH = "/data/persistent_image_cache.json"
+
+
+def _load_persistent_image_cache() -> None:
+    """Load the persistent image URL cache from disk on startup."""
+    global _PERSISTENT_IMAGE_URL_CACHE
+    try:
+        if os.path.exists(_PERSISTENT_CACHE_PATH):
+            with open(_PERSISTENT_CACHE_PATH, "r") as f:
+                _PERSISTENT_IMAGE_URL_CACHE = json.load(f)
+            print(f"[PERSISTENT CACHE] Loaded {len(_PERSISTENT_IMAGE_URL_CACHE)} cached image URLs from disk.", flush=True)
+        else:
+            _PERSISTENT_IMAGE_URL_CACHE = {}
+            print("[PERSISTENT CACHE] No cache file found, starting fresh.", flush=True)
+    except Exception as e:
+        _PERSISTENT_IMAGE_URL_CACHE = {}
+        print(f"[PERSISTENT CACHE] Failed to load cache: {e}", flush=True)
+
+
+def _save_persistent_image_cache() -> None:
+    """Save the persistent image URL cache to disk."""
+    try:
+        os.makedirs(os.path.dirname(_PERSISTENT_CACHE_PATH), exist_ok=True)
+        with open(_PERSISTENT_CACHE_PATH, "w") as f:
+            json.dump(_PERSISTENT_IMAGE_URL_CACHE, f)
+    except Exception as e:
+        print(f"[PERSISTENT CACHE] Failed to save cache: {e}", flush=True)
+
+
+def _get_persistent_image(name: str) -> Optional[str]:
+    """Look up a product image URL from the persistent cache."""
+    return _PERSISTENT_IMAGE_URL_CACHE.get(name.lower().strip())
+
+
+def _set_persistent_image(name: str, url: str) -> None:
+    """Save a product image URL to the persistent cache and write to disk."""
+    _PERSISTENT_IMAGE_URL_CACHE[name.lower().strip()] = url
+    _save_persistent_image_cache()
+
 # =========================
 # OCR / scanner constants
 # =========================
@@ -1475,7 +1516,8 @@ async def _startup() -> None:
     _init_google_credentials_file()
     _load_learned_map()
     _load_pending_map()
-    print("Startup complete. Image cache cleared.")
+    _load_persistent_image_cache()
+    print("Startup complete. Image cache cleared.", flush=True)
 
 
 @app.on_event("shutdown")
@@ -1720,8 +1762,11 @@ def _public_base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def _image_url_for_item(base_url: str, name: str) -> str:
-    return f"{base_url}/image?name={urllib.parse.quote((name or '').strip())}"
+def _image_url_for_item(base_url: str, name: str, category: Optional[str] = None) -> str:
+    url = f"{base_url}/image?name={urllib.parse.quote((name or '').strip())}"
+    if category:
+        url += f"&category={urllib.parse.quote(category.strip())}"
+    return url
 
 
 def detect_store_hint(raw_lines: List[str]) -> str:
@@ -3316,7 +3361,7 @@ async def parse_receipt(
             "name": final_name,
             "quantity": int(max(1, qty)),
             "category": category,
-            "image_url": _image_url_for_item(base_url, final_name),
+            "image_url": _image_url_for_item(base_url, final_name, category),
             "_raw_line": c.raw_line,
             "_name_cleaned": _clean_line(nm),
             "_expanded": dbg.get("base", ""),
@@ -3365,7 +3410,7 @@ async def parse_receipt(
 
             if enriched_final and _has_valid_item_words(enriched_final) and not _is_noise_line(enriched_final) and not _is_header_or_address(enriched_final) and not _is_store_or_header_line_anywhere(enriched_final) and not _is_junk_line(enriched_final):
                 it["name"] = enriched_final
-                it["image_url"] = _image_url_for_item(base_url, enriched_final)
+                it["image_url"] = _image_url_for_item(base_url, enriched_final, it.get("category"))
 
         for it in items:
             it.pop("_raw_line", None)
@@ -3384,7 +3429,7 @@ async def parse_receipt(
             gemini_name = (info.get("full_name") or "").strip()
             if gemini_name and len(gemini_name) >= 3:
                 it["name"] = gemini_name
-                it["image_url"] = _image_url_for_item(base_url, gemini_name)
+                it["image_url"] = _image_url_for_item(base_url, gemini_name, it.get("category"))
 
     return items
 
@@ -3505,7 +3550,7 @@ async def parse_receipt_debug(
             "name": final_name,
             "quantity": int(max(1, qty)),
             "category": category,
-            "image_url": _image_url_for_item(base_url, final_name),
+            "image_url": _image_url_for_item(base_url, final_name, category),
         })
 
     if merge_duplicates:
@@ -3779,19 +3824,98 @@ def _simplify_for_unsplash(name: str) -> str:
     return s_lower
 
 
-async def _unsplash_image(name: str) -> Optional[str]:
-    """Search Unsplash for a product photo by name, using a simplified food keyword."""
+def _is_household_item(name: str) -> bool:
+    """Returns True if the item name looks like a household/cleaning product."""
+    n = name.lower()
+    signals = [
+        "paper towel", "toilet paper", "bath tissue", "tissue", "napkin",
+        "trash bag", "garbage bag", "ziploc", "plastic wrap", "aluminum foil",
+        "parchment", "wax paper", "plastic bag", "storage bag",
+        "dish soap", "dishwasher", "laundry", "detergent", "fabric softener",
+        "dryer sheet", "bleach", "cleaner", "disinfect", "windex", "lysol",
+        "clorox", "swiffer", "mop", "broom", "sponge", "scrub",
+        "air freshener", "febreze", "candle", "batteries", "light bulb",
+        "hand soap", "body wash", "shampoo", "conditioner", "toothpaste",
+        "toothbrush", "deodorant", "razor", "mouthwash", "floss",
+        "cotton ball", "q-tip", "bandage", "band-aid", "lotion", "sunscreen",
+        "toilet", "shower", "soap", "wash", "clean", "wipe",
+    ]
+    return any(s in n for s in signals)
+
+
+def _is_food_photo(photo: dict) -> bool:
+    """Check Unsplash photo tags/description to confirm it's actually a food photo."""
+    food_keywords = {
+        "food", "eat", "meal", "dish", "cook", "kitchen", "ingredient", "recipe",
+        "fruit", "vegetable", "meat", "dairy", "cheese", "bread", "pasta", "rice",
+        "soup", "salad", "snack", "drink", "beverage", "juice", "milk", "cream",
+        "butter", "egg", "chicken", "beef", "pork", "fish", "seafood", "shrimp",
+        "pizza", "burger", "sandwich", "wrap", "taco", "sushi", "noodle",
+        "cake", "dessert", "chocolate", "candy", "cookie", "cereal", "oat",
+        "coffee", "tea", "wine", "beer", "sauce", "condiment", "spice", "herb",
+        "grocery", "produce", "fresh", "organic", "healthy", "nutrition",
+        "apple", "banana", "orange", "berry", "strawberry", "tomato", "potato",
+        "onion", "garlic", "pepper", "carrot", "broccoli", "spinach", "lettuce",
+        "lemon", "lime", "avocado", "mushroom", "corn", "bean", "pea",
+        "yogurt", "ice cream", "frozen", "canned", "jar", "bottle", "package",
+    }
+
+    non_food_keywords = {
+        "store", "shop", "market interior", "building", "architecture", "street",
+        "person", "people", "face", "portrait", "fashion", "clothing", "outfit",
+        "nature", "landscape", "travel", "city", "office", "technology",
+        "animal", "pet", "dog", "cat", "flower", "plant", "tree", "forest",
+    }
+
+    # Gather all text signals from the photo
+    text_signals = []
+    desc = (photo.get("description") or "").lower()
+    alt = (photo.get("alt_description") or "").lower()
+    text_signals.append(desc)
+    text_signals.append(alt)
+    for tag in photo.get("tags") or []:
+        text_signals.append((tag.get("title") or "").lower())
+
+    combined = " ".join(text_signals)
+
+    # Reject if clearly non-food
+    for bad in non_food_keywords:
+        if bad in combined and not any(good in combined for good in food_keywords):
+            return False
+
+    # Accept if any food keyword found
+    if any(kw in combined for kw in food_keywords):
+        return True
+
+    # If no tags at all, accept anyway (better than nothing)
+    if not combined.strip():
+        return True
+
+    return False
+
+
+async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str]:
+    """Search Unsplash for a product photo, using the right bias for food vs household."""
     try:
         access_key = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
         if not access_key:
             return None
 
-        # Always simplify the name so Unsplash gets a clean food keyword
+        # Simplify the name so Unsplash gets a clean keyword
         simplified = _simplify_for_unsplash(name)
 
-        async def _search(query: str) -> Optional[str]:
-            encoded = urllib.parse.quote(query.strip())
-            url = f"https://api.unsplash.com/search/photos?query={encoded}&per_page=5&orientation=squarish"
+        # Use the right search suffix depending on item type
+        if is_household:
+            suffix = "product white background"
+            fallback_query = "household cleaning product"
+        else:
+            suffix = "food"
+            fallback_query = "fresh healthy food"
+
+        async def _search(query: str, require_food_check: bool = True) -> Optional[str]:
+            full_query = f"{query} {suffix}"
+            encoded = urllib.parse.quote(full_query.strip())
+            url = f"https://api.unsplash.com/search/photos?query={encoded}&per_page=10&orientation=squarish"
             async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as uc:
                 resp = await uc.get(url, headers={"Authorization": f"Client-ID {access_key}"})
                 if resp.status_code == 200:
@@ -3799,9 +3923,15 @@ async def _unsplash_image(name: str) -> Optional[str]:
                     results = data.get("results", [])
                     for photo in results:
                         img_url = (photo.get("urls") or {}).get("regular") or (photo.get("urls") or {}).get("small")
-                        if img_url and img_url.startswith("http"):
-                            print(f"[UNSPLASH] found image for '{query}': {img_url}", flush=True)
-                            return img_url
+                        if not img_url or not img_url.startswith("http"):
+                            continue
+                        # For food items only, filter out non-food photos
+                        if not is_household and require_food_check and not _is_food_photo(photo):
+                            print(f"[UNSPLASH] rejected non-food photo for '{query}'", flush=True)
+                            continue
+                        print(f"[UNSPLASH] found image for '{query}': {img_url}", flush=True)
+                        return img_url
+                    print(f"[UNSPLASH] no photo found for '{query}'", flush=True)
                 else:
                     print(f"[UNSPLASH] error status={resp.status_code} for '{query}'", flush=True)
             return None
@@ -3809,14 +3939,19 @@ async def _unsplash_image(name: str) -> Optional[str]:
         # Try simplified name first
         img_url = await _search(simplified)
 
-        # If simplified didn't work, try just the last 2 words (e.g. "cheddar cheese")
+        # Try just the last 2 words (e.g. "cheddar cheese" or "paper towel")
         if not img_url and len(simplified.split()) > 2:
             short = " ".join(simplified.split()[-2:])
             img_url = await _search(short)
 
-        # Last resort — search just "food" to guarantee something comes back
+        # Try first word only
         if not img_url:
-            img_url = await _search("fresh food grocery")
+            first = simplified.split()[0] if simplified.split() else simplified
+            img_url = await _search(first)
+
+        # Absolute last resort — generic fallback, skip food check
+        if not img_url:
+            img_url = await _search(fallback_query, require_food_check=False)
 
         return img_url
 
@@ -3888,7 +4023,7 @@ async def _kroger_image(name: str) -> Optional[str]:
 
 
 @app.get("/image")
-async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(None), product_id: Optional[str] = Query(None)):
+async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(None), product_id: Optional[str] = Query(None), category: Optional[str] = Query(None)):
     ck = _cache_key(name, upc, product_id)
 
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
@@ -3922,6 +4057,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key)
 
+    # ── PERSISTENT CACHE CHECK ─────────────────────────────────────────────────
+    # Check persistent disk cache first — same photo every time, no API call needed
+    if not img_url:
+        cached = _get_persistent_image(name)
+        if cached:
+            print(f"[PERSISTENT CACHE] hit for '{name}': {cached}", flush=True)
+            img_url = cached
+
     # Helper: strip store brand prefix for retry attempts
     store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value ",
                     "good & gather ", "market pantry ", "simple truth ",
@@ -3935,12 +4078,13 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                 stripped_name = candidate_stripped
             break
 
-    # ── STEP 1: Unsplash (always returns a clean food photo) ──────────────────
-    # _unsplash_image strips brand names/sizes internally and has a guaranteed
-    # fallback search so every item gets a photo.
+    # Detect household items so Unsplash searches correctly
+    is_household = (category or "").lower() == "household" or _is_household_item(name)
+
+    # ── STEP 1: Unsplash (always returns a clean photo) ─────────────────────
     if not img_url:
         try:
-            img_url = await _unsplash_image(name)
+            img_url = await _unsplash_image(name, is_household=is_household)
         except Exception as e:
             print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
 
@@ -3978,6 +4122,12 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     if not img_url:
         img_url = FALLBACK_PRODUCT_IMAGE
+
+    # ── SAVE TO PERSISTENT CACHE ──────────────────────────────────────────
+    # Only save if this is a real item photo (not the generic fallback)
+    if img_url and img_url != FALLBACK_PRODUCT_IMAGE and not _get_persistent_image(name):
+        _set_persistent_image(name, img_url)
+        print(f"[PERSISTENT CACHE] saved '{name}' -> {img_url}", flush=True)
 
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as iclient:
