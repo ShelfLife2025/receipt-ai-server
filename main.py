@@ -4013,11 +4013,18 @@ async def _expand_receipt_name(name: str) -> str:
             f"'Buitoni Pes Bas Sauce' -> 'Buitoni Pesto Basil Sauce'\n"
             f"Expanded name:"
         )
-        response = model.generate_content(prompt)
+        # 3 second timeout — if Gemini is slow, just use the original name
+        response = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, model.generate_content, prompt),
+            timeout=3.0
+        )
         expanded = response.text.strip().strip('"').strip("'")
         if expanded and len(expanded) > 2:
             print(f"[EXPAND NAME] '{name}' -> '{expanded}'", flush=True)
             return expanded
+        return name
+    except asyncio.TimeoutError:
+        print(f"[EXPAND NAME] timeout for '{name}', using original", flush=True)
         return name
     except Exception as e:
         print(f"[EXPAND NAME] error for '{name}': {e}", flush=True)
@@ -4187,10 +4194,6 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
             _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
             _trim_caches_if_needed()
             return Response(content=img_bytes, media_type=ctype)
-
-    # ── EXPAND RECEIPT ABBREVIATIONS ──────────────────────────────────────────
-    # Gemini turns "Ck Sl Cookie" into "Chocolate Slice Cookie" before image search
-    name = await _expand_receipt_name(name)
 
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key)
