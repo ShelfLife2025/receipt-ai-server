@@ -4033,10 +4033,7 @@ async def _google_product_image(name: str) -> Optional[str]:
             print("[GOOGLE IMAGE] missing GOOGLE_IMAGE_API_KEY or GOOGLE_IMAGE_CX", flush=True)
             return None
 
-        # Simplify the search term — strip brand names and sizes
-        simplified = _simplify_for_unsplash(name)  # reuse our simplify function
-
-        # Sites known for clean, white-background product photos
+        # Sites known for clean product photos
         site_restrict = (
             "site:walmart.com OR site:target.com OR site:kroger.com OR "
             "site:instacart.com OR site:amazon.com OR site:publix.com OR "
@@ -4074,13 +4071,21 @@ async def _google_product_image(name: str) -> Optional[str]:
                     print(f"[GOOGLE IMAGE] error status={resp.status_code} for '{query}'", flush=True)
             return None
 
-        # Try simplified name first
-        img_url = await _search(simplified)
+        # Try full name first (keeps brand name — best chance of exact product match)
+        img_url = await _search(name)
 
-        # Try stripped down to last 2 words
-        if not img_url and len(simplified.split()) > 2:
-            short = " ".join(simplified.split()[-2:])
-            img_url = await _search(short)
+        # Fall back to simplified name (strips brand/size) if full name got nothing
+        if not img_url:
+            simplified = _simplify_for_unsplash(name)
+            if simplified.lower() != name.lower():
+                img_url = await _search(simplified)
+
+        # Last resort — just the last 2 meaningful words
+        if not img_url:
+            words = (simplified if 'simplified' in dir() else name).split()
+            if len(words) > 2:
+                short = " ".join(words[-2:])
+                img_url = await _search(short)
 
         return img_url
 
