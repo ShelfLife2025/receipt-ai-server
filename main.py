@@ -3979,6 +3979,71 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
     return None
 
 
+async def _google_product_image(name: str) -> Optional[str]:
+    """Search Google Custom Search for clean product images from grocery/retail sites."""
+    try:
+        api_key = os.getenv("GOOGLE_IMAGE_API_KEY", "").strip()
+        cx = os.getenv("GOOGLE_IMAGE_CX", "").strip()
+        if not api_key or not cx:
+            print("[GOOGLE IMAGE] missing GOOGLE_IMAGE_API_KEY or GOOGLE_IMAGE_CX", flush=True)
+            return None
+
+        # Simplify the search term — strip brand names and sizes
+        simplified = _simplify_for_unsplash(name)  # reuse our simplify function
+
+        # Sites known for clean, white-background product photos
+        site_restrict = (
+            "site:walmart.com OR site:target.com OR site:kroger.com OR "
+            "site:instacart.com OR site:amazon.com OR site:publix.com OR "
+            "site:wholefoodsmarket.com OR site:freshdirect.com"
+        )
+
+        async def _search(query: str) -> Optional[str]:
+            params = {
+                "key": api_key,
+                "cx": cx,
+                "q": f"{query} {site_restrict}",
+                "searchType": "image",
+                "num": 5,
+                "imgType": "photo",
+                "imgSize": "medium",
+                "safe": "active",
+            }
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as gc:
+                resp = await gc.get(
+                    "https://www.googleapis.com/customsearch/v1",
+                    params=params
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("items", [])
+                    for item in items:
+                        img_url = item.get("link", "")
+                        if img_url and img_url.startswith("http") and _is_good_product_image(img_url):
+                            print(f"[GOOGLE IMAGE] found for '{query}': {img_url}", flush=True)
+                            return img_url
+                    print(f"[GOOGLE IMAGE] no usable result for '{query}'", flush=True)
+                elif resp.status_code == 429:
+                    print("[GOOGLE IMAGE] quota exceeded", flush=True)
+                else:
+                    print(f"[GOOGLE IMAGE] error status={resp.status_code} for '{query}'", flush=True)
+            return None
+
+        # Try simplified name first
+        img_url = await _search(simplified)
+
+        # Try stripped down to last 2 words
+        if not img_url and len(simplified.split()) > 2:
+            short = " ".join(simplified.split()[-2:])
+            img_url = await _search(short)
+
+        return img_url
+
+    except Exception as e:
+        print(f"[GOOGLE IMAGE] error for '{name}': {e}", flush=True)
+    return None
+
+
 async def _freepik_image(name: str) -> Optional[str]:
     """Search Freepik stock photos by name."""
     try:
@@ -4097,15 +4162,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                 stripped_name = candidate_stripped
             break
 
-    # Detect household items so Unsplash searches correctly
     is_household = (category or "").lower() == "household" or _is_household_item(name)
 
-    # ── STEP 1: Unsplash (always returns a clean photo) ─────────────────────
+    # ── STEP 1: Google Custom Search (grocery/retail sites — clean product photos) ──
     if not img_url:
         try:
-            img_url = await _unsplash_image(name, is_household=is_household)
+            img_url = await _google_product_image(name)
         except Exception as e:
-            print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
+            print(f"[GOOGLE IMAGE] error for '{name}': {e}", flush=True)
 
     # ── STEP 2: Kroger API (packaged goods backup) ──────────────────────────
     if not img_url:
@@ -4126,7 +4190,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 3: Freepik (last resort) ────────────────────────────────────────
+    # ── STEP 3: Unsplash (food/household photo fallback) ──────────────────────
+    if not img_url:
+        try:
+            img_url = await _unsplash_image(name, is_household=is_household)
+        except Exception as e:
+            print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
+
+    # ── STEP 4: Freepik (last resort) ────────────────────────────────────────
     if not img_url:
         try:
             img_url = await _freepik_image(name)
