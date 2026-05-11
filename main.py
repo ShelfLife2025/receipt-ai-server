@@ -715,7 +715,7 @@ Items:
 
 Respond with ONLY a valid JSON array, no markdown."""
 
-        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-001"):
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
             try:
                 print(f"[GEMINI] Trying model: {model_name}", flush=True)
                 model = genai.GenerativeModel(model_name)
@@ -4436,7 +4436,7 @@ Only return the JSON array. No markdown, no explanation, no code blocks."""
         return suggestions
 
     try:
-        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash-lite"):
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
@@ -4542,7 +4542,7 @@ Only return the JSON object. No markdown, no explanation, no code blocks."""
         return fallback
 
     try:
-        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash-lite"):
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
