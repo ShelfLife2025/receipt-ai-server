@@ -3904,10 +3904,29 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
         # Simplify the name so Unsplash gets a clean keyword
         simplified = _simplify_for_unsplash(name)
 
+        # Detect if item is a packaged/processed product — use "packaged" suffix
+        # to avoid raw ingredient photos (e.g. raw chicken instead of packaged fillets)
+        packaged_signals = [
+            "fillet", "fillets", "nugget", "nuggets", "strip", "strips", "tender", "tenders",
+            "patty", "patties", "breaded", "battered", "frozen", "canned", "jarred",
+            "sliced", "shredded", "diced", "chopped", "ground", "seasoned",
+            "roasted", "baked", "smoked", "cured", "deli", "luncheon",
+            "sauce", "dressing", "marinade", "seasoning", "mix", "blend",
+            "cereal", "cracker", "chip", "cookie", "cake", "roll", "bread",
+            "pasta", "noodle", "rice cake", "popcorn", "pretzel",
+            "yogurt", "cream cheese", "cottage cheese", "sour cream",
+            "juice", "drink", "soda", "water", "milk", "creamer",
+        ]
+        name_lower_check = name.lower()
+        is_packaged = any(sig in name_lower_check for sig in packaged_signals)
+
         # Use the right search suffix depending on item type
         if is_household:
             suffix = "product white background"
             fallback_query = "household cleaning product"
+        elif is_packaged:
+            suffix = "packaged food product"
+            fallback_query = "packaged grocery food product"
         else:
             suffix = "food"
             fallback_query = "fresh healthy food"
@@ -4155,6 +4174,23 @@ def _require_admin(key: Optional[str]) -> None:
         raise HTTPException(status_code=500, detail="ADMIN_KEY not set on server")
     if not key or key.strip() != ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/admin/clear-image-cache")
+async def admin_clear_image_cache(key: Optional[str] = Query(None)):
+    """Clears both the in-memory image cache and the persistent disk cache."""
+    _require_admin(key)
+    _IMAGE_CACHE.clear()
+    _IMAGE_CONTENT_TYPE_CACHE.clear()
+    global _PERSISTENT_IMAGE_URL_CACHE
+    _PERSISTENT_IMAGE_URL_CACHE = {}
+    try:
+        if os.path.exists(_PERSISTENT_CACHE_PATH):
+            os.remove(_PERSISTENT_CACHE_PATH)
+    except Exception as e:
+        print(f"[CACHE CLEAR] failed to delete cache file: {e}", flush=True)
+    print("[CACHE CLEAR] All image caches cleared by admin.", flush=True)
+    return {"status": "ok", "message": "All image caches cleared. Next requests will fetch fresh photos."}
 
 
 @app.get("/admin/learned-map")
