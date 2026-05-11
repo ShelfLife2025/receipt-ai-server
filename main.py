@@ -3688,27 +3688,138 @@ async def _open_food_facts_image(name: str) -> Optional[str]:
     return None
 
 
+def _simplify_for_unsplash(name: str) -> str:
+    """Strip brand names, sizes, weights, and noise so Unsplash gets a clean food keyword."""
+    import re
+    s = name.strip()
+
+    # Remove common brand names
+    brands = [
+        "kraft", "heinz", "campbell\'s", "campbells", "general mills", "kellogg\'s", "kelloggs",
+        "pepperidge farm", "nabisco", "frito-lay", "lay\'s", "lays", "doritos", "cheetos",
+        "pringles", "oreo", "chips ahoy", "ritz", "triscuit", "wheat thins",
+        "quaker", "nature valley", "kind", "clif", "luna",
+        "coca-cola", "coke", "pepsi", "sprite", "fanta", "dr pepper", "mountain dew",
+        "gatorade", "powerade", "red bull", "monster",
+        "tropicana", "minute maid", "simply", "ocean spray", "dole",
+        "chobani", "fage", "yoplait", "oikos", "siggi\'s", "siggis",
+        "sargento", "tillamook", "cabot", "boar\'s head", "boars head",
+        "oscar mayer", "hillshire farm", "jimmy dean", "tyson", "perdue",
+        "birds eye", "green giant", "del monte", "bush\'s", "bushs",
+        "hunts", "hunt\'s", "muir glen", "prego", "ragu", "newman\'s own", "newmans own",
+        "annie\'s", "annies", "amy\'s", "amys", "cascadian farm",
+        "stonyfield", "horizon", "organic valley",
+        "land o lakes", "land o\'lakes", "breakstone\'s", "breakstones",
+        "philadelphia", "velveeta", "laughing cow",
+        "hellmann\'s", "hellmanns", "best foods", "duke\'s", "dukes",
+        "french\'s", "frenchs", "gulden\'s", "guldens", "heinz",
+        "wishbone", "ken\'s", "kens", "hidden valley", "ranch",
+        "publix", "great value", "store brand", "generic", "signature select",
+        "365", "simple truth", "open nature", "o organics",
+        "progresso", "swanson", "lipton", "knorr", "idahoan",
+        "uncle ben\'s", "uncle bens", "ben\'s original", "bens original",
+        "rice-a-roni", "pasta roni", "hamburger helper", "betty crocker",
+        "pillsbury", "jiffy", "bisquick",
+        "jif", "skippy", "peter pan", "smucker\'s", "smuckers",
+        "nutella", "biscoff",
+        "domino", "c&h", "bob\'s red mill", "bobs red mill",
+        "mccormick", "lawry\'s", "lawrys", "old bay", "tone\'s", "tones",
+        "barilla", "ronzoni", "mueller\'s", "muellers", "de cecco",
+        "bertolli", "colavita", "filippo berio",
+        "dannon", "activia",
+        "bolthouse", "naked", "odwalla",
+        "ben & jerry\'s", "ben and jerrys", "haagen-dazs", "breyers", "dreyer\'s", "dreyers",
+        "talenti", "arctic zero",
+        "birds eye", "alexia", "ore-ida",
+        "stouffer\'s", "stouffers", "lean cuisine", "healthy choice", "marie callender\'s",
+        "digorno", "digiorno", "red baron", "tombstone",
+        "kashi", "special k", "cheerios", "frosted flakes", "lucky charms",
+        "cap\'n crunch", "capn crunch", "cocoa puffs", "froot loops", "fruit loops",
+        "honey bunches", "life cereal",
+        "thomas\'", "thomas", "arnold", "pepperidge",
+        "wonder", "nature\'s own", "natures own", "dave\'s killer", "daves killer",
+        "mission", "old el paso", "taco bell", "ortega",
+        "pam", "crisco", "wesson",
+        "splenda", "truvia", "equal", "sweet\'n low",
+        "crystal light", "mio", "true lemon",
+        "emerald", "planters", "blue diamond", "wonderful",
+        "sun-maid", "sunmaid", "craisins", "ocean spray",
+    ]
+
+    s_lower = s.lower()
+    for brand in brands:
+        pattern = re.compile(re.escape(brand), re.IGNORECASE)
+        s_lower = pattern.sub("", s_lower)
+
+    # Remove size/weight/count patterns like 12oz, 2lb, 16 fl oz, 6ct, 32 count, etc.
+    s_lower = re.sub(r'\b\d+(\.\d+)?\s*(oz|fl\.?\s*oz|lb|lbs|g|kg|ml|l|ct|count|pk|pack|piece|pcs|slices?|serving)s?\b', '', s_lower, flags=re.IGNORECASE)
+
+    # Remove standalone numbers
+    s_lower = re.sub(r'\b\d+\b', '', s_lower)
+
+    # Remove filler words
+    fillers = ["original", "classic", "premium", "value", "family size", "mega", "super",
+               "new", "improved", "natural", "organic", "fresh", "extra", "ultra",
+               "select", "choice", "grade a", "grade b", "light", "lite", "low fat",
+               "fat free", "sugar free", "reduced", "less", "more", "plus",
+               "&", "and", "with", "in", "the", "a", "an", "of"]
+    for filler in fillers:
+        s_lower = re.sub(r'\b' + re.escape(filler) + r'\b', '', s_lower, flags=re.IGNORECASE)
+
+    # Clean up punctuation and extra spaces
+    s_lower = re.sub(r'[^a-z\s]', ' ', s_lower)
+    s_lower = re.sub(r'\s+', ' ', s_lower).strip()
+
+    # If we stripped everything, fall back to last 1-2 meaningful words of original
+    if not s_lower or len(s_lower) < 3:
+        words = [w for w in name.lower().split() if len(w) > 3]
+        s_lower = " ".join(words[-2:]) if words else name.lower()
+
+    print(f"[UNSPLASH SIMPLIFY] '{name}' -> '{s_lower}'", flush=True)
+    return s_lower
+
+
 async def _unsplash_image(name: str) -> Optional[str]:
-    """Search Unsplash for a product photo by name."""
+    """Search Unsplash for a product photo by name, using a simplified food keyword."""
     try:
         access_key = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
         if not access_key:
             return None
-        search_query = urllib.parse.quote(name.strip())
-        url = f"https://api.unsplash.com/search/photos?query={search_query}&per_page=5&orientation=squarish"
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as uc:
-            resp = await uc.get(url, headers={"Authorization": f"Client-ID {access_key}"})
-            if resp.status_code == 200:
-                data = resp.json()
-                results = data.get("results", [])
-                for photo in results:
-                    img_url = (photo.get("urls") or {}).get("regular") or (photo.get("urls") or {}).get("small")
-                    if img_url and img_url.startswith("http") and _is_good_product_image(img_url):
-                        print(f"[UNSPLASH] found image for '{name}': {img_url}", flush=True)
-                        return img_url
-                print(f"[UNSPLASH] no usable image found for '{name}'", flush=True)
-            else:
-                print(f"[UNSPLASH] error for '{name}' status={resp.status_code}", flush=True)
+
+        # Always simplify the name so Unsplash gets a clean food keyword
+        simplified = _simplify_for_unsplash(name)
+
+        async def _search(query: str) -> Optional[str]:
+            encoded = urllib.parse.quote(query.strip())
+            url = f"https://api.unsplash.com/search/photos?query={encoded}&per_page=5&orientation=squarish"
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as uc:
+                resp = await uc.get(url, headers={"Authorization": f"Client-ID {access_key}"})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results = data.get("results", [])
+                    for photo in results:
+                        img_url = (photo.get("urls") or {}).get("regular") or (photo.get("urls") or {}).get("small")
+                        if img_url and img_url.startswith("http"):
+                            print(f"[UNSPLASH] found image for '{query}': {img_url}", flush=True)
+                            return img_url
+                else:
+                    print(f"[UNSPLASH] error status={resp.status_code} for '{query}'", flush=True)
+            return None
+
+        # Try simplified name first
+        img_url = await _search(simplified)
+
+        # If simplified didn't work, try just the last 2 words (e.g. "cheddar cheese")
+        if not img_url and len(simplified.split()) > 2:
+            short = " ".join(simplified.split()[-2:])
+            img_url = await _search(short)
+
+        # Last resort — search just "food" to guarantee something comes back
+        if not img_url:
+            img_url = await _search("fresh food grocery")
+
+        return img_url
+
     except Exception as e:
         print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
     return None
@@ -3824,18 +3935,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                 stripped_name = candidate_stripped
             break
 
-    # ── STEP 1: Unsplash (clean keyword-based food photos) ────────────────────
+    # ── STEP 1: Unsplash (always returns a clean food photo) ──────────────────
+    # _unsplash_image strips brand names/sizes internally and has a guaranteed
+    # fallback search so every item gets a photo.
     if not img_url:
         try:
             img_url = await _unsplash_image(name)
         except Exception as e:
             print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
-
-    if not img_url and stripped_name:
-        try:
-            img_url = await _unsplash_image(stripped_name)
-        except Exception:
-            pass
 
     # ── STEP 2: Kroger API (packaged goods backup) ──────────────────────────
     if not img_url:
