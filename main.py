@@ -3684,7 +3684,7 @@ def _is_good_product_image(url: str) -> bool:
     url_lower = url.lower()
     # Reject known bad URL patterns
     bad_patterns = [
-        "nutrition", "ingredient", "back", "label",
+        "nutrition", "ingredient", "label",
         "istockphoto", "shutterstock", "gettyimages", "dreamstime",
         "alamy", "depositphotos",
     ]
@@ -4040,18 +4040,13 @@ async def _google_product_image(name: str) -> Optional[str]:
             print("[GOOGLE IMAGE] missing GOOGLE_IMAGE_API_KEY or GOOGLE_IMAGE_CX", flush=True)
             return None
 
-        # Sites known for clean product photos
-        site_restrict = (
-            "site:walmart.com OR site:target.com OR site:kroger.com OR "
-            "site:instacart.com OR site:amazon.com OR site:publix.com OR "
-            "site:wholefoodsmarket.com OR site:freshdirect.com"
-        )
-
         async def _search(query: str) -> Optional[str]:
+            # Search just the product name — the search engine is already
+            # restricted to retail sites via the CX configuration
             params = {
                 "key": api_key,
                 "cx": cx,
-                "q": f"{query} {site_restrict}",
+                "q": query,
                 "searchType": "image",
                 "num": 5,
                 "imgType": "photo",
