@@ -3687,6 +3687,8 @@ def _is_good_product_image(url: str) -> bool:
         "nutrition", "ingredient", "label",
         "istockphoto", "shutterstock", "gettyimages", "dreamstime",
         "alamy", "depositphotos",
+        # Kroger store brand (mascot cartoon guy) — reject and fall through to Unsplash
+        "/0001111",
     ]
     for pat in bad_patterns:
         if pat in url_lower:
