@@ -4216,14 +4216,11 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     is_household = (category or "").lower() == "household" or _is_household_item(name)
 
-    # ── STEP 1: Google Custom Search (grocery/retail sites — clean product photos) ──
-    if not img_url:
-        try:
-            img_url = await _google_product_image(name)
-        except Exception as e:
-            print(f"[GOOGLE IMAGE] error for '{name}': {e}", flush=True)
+    # ── EXPAND NAME WITH GEMINI BEFORE IMAGE SEARCH ──────────────────────────
+    # Turns "Ck Sl Cookie" -> "Chocolate Slice Cookie" before searching
+    name = await _expand_receipt_name(name)
 
-    # ── STEP 2: Kroger API (packaged goods backup) ──────────────────────────
+    # ── STEP 1: Kroger API (primary — real product photos) ────────────────────
     if not img_url:
         try:
             img_url = await _kroger_image(name)
@@ -4242,14 +4239,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 3: Unsplash (food/household photo fallback) ──────────────────────
+    # ── STEP 2: Unsplash (fallback for fresh produce / items Kroger doesn't have) ──
     if not img_url:
         try:
             img_url = await _unsplash_image(name, is_household=is_household)
         except Exception as e:
             print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
 
-    # ── STEP 4: Freepik (last resort) ────────────────────────────────────────
+    # ── STEP 3: Freepik (last resort) ────────────────────────────────────────
     if not img_url:
         try:
             img_url = await _freepik_image(name)
