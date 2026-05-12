@@ -3924,19 +3924,19 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
 
         # Use the right search suffix depending on item type
         if is_household:
-            suffix = "product white background"
-            fallback_query = "household cleaning product"
+            suffix = "product packaging white background"
+            fallback_query = "household cleaning product packaging"
         elif is_packaged:
-            suffix = "packaged food product"
-            fallback_query = "packaged grocery food product"
+            suffix = "grocery store product packaging"
+            fallback_query = "packaged grocery food supermarket"
         else:
-            suffix = "food"
-            fallback_query = "fresh healthy food"
+            suffix = "fresh grocery supermarket"
+            fallback_query = "fresh food grocery store"
 
         async def _search(query: str, require_food_check: bool = True) -> Optional[str]:
             full_query = f"{query} {suffix}"
             encoded = urllib.parse.quote(full_query.strip())
-            url = f"https://api.unsplash.com/search/photos?query={encoded}&per_page=10&orientation=squarish"
+            url = f"https://api.unsplash.com/search/photos?query={encoded}&per_page=10&orientation=squarish&content_filter=high"
             async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as uc:
                 resp = await uc.get(url, headers={"Authorization": f"Client-ID {access_key}"})
                 if resp.status_code == 200:
