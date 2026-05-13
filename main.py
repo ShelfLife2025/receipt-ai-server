@@ -4140,33 +4140,77 @@ async def _kroger_image(name: str) -> Optional[str]:
     token = await _kroger_get_token()
     if not token:
         return None
+
+    # Build a set of meaningful words from the search name for relevance checking
+    _stop_words = {
+        "a", "an", "the", "and", "or", "of", "with", "in", "on", "for", "to",
+        "oz", "lb", "ct", "pk", "pack", "bottle", "bottles", "bag", "bags",
+        "box", "can", "jar", "gallon", "fl", "g", "kg", "ml", "liter",
+        "count", "organic", "fresh", "large", "small", "medium"
+    }
+    search_tokens = set(
+        w for w in re.sub(r"[^a-z0-9\s]", " ", name.lower()).split()
+        if w not in _stop_words and len(w) >= 3
+    )
+
     try:
         search_term = urllib.parse.quote(name)
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
             r = await client.get(
-                f"https://api.kroger.com/v1/products?filter.term={search_term}&filter.limit=1",
+                f"https://api.kroger.com/v1/products?filter.term={search_term}&filter.limit=5",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
                 },
             )
-            if r.status_code == 200:
-                data = r.json()
-                products = data.get("data", [])
-                if products:
-                    images = products[0].get("images", [])
-                    for img in images:
-                        sizes = img.get("sizes", [])
-                        for sz in sizes:
-                            url = sz.get("url", "")
-                            if url and url.startswith("http"):
-                                print(f"[KROGER] found image for '{name}': {url}", flush=True)
-                                return url
-                print(f"[KROGER] no image found for '{name}'", flush=True)
-                return None
-            else:
+            if r.status_code != 200:
                 print(f"[KROGER] search error status={r.status_code} for '{name}'", flush=True)
                 return None
+
+            data = r.json()
+            products = data.get("data", [])
+            if not products:
+                print(f"[KROGER] no products found for '{name}'", flush=True)
+                return None
+
+            for product in products:
+                # Get the product description from Kroger to check relevance
+                description = (product.get("description") or "").lower().strip()
+                brand = (product.get("brand") or "").lower().strip()
+                full_text = f"{brand} {description}".strip()
+
+                if not description:
+                    continue
+
+                product_tokens = set(
+                    w for w in re.sub(r"[^a-z0-9\s]", " ", full_text).split()
+                    if w not in _stop_words and len(w) >= 3
+                )
+
+                # Must share at least 1 meaningful word with what we searched
+                overlap = search_tokens & product_tokens
+                if not overlap:
+                    print(f"[KROGER] rejected '{description}' — no word overlap with '{name}'", flush=True)
+                    continue
+
+                # Get the image from this matching product
+                images = product.get("images", [])
+                for img in images:
+                    sizes = img.get("sizes", [])
+                    for sz in sizes:
+                        url = sz.get("url", "")
+                        if not url or not url.startswith("http"):
+                            continue
+                        # Reject store brand mascot images
+                        if "/0001111" in url:
+                            print(f"[KROGER] rejected store brand URL for '{name}': {url}", flush=True)
+                            continue
+                        print(f"[KROGER] found image for '{name}' matched '{description}': {url}", flush=True)
+                        return url
+
+            print(f"[KROGER] no valid match found for '{name}'", flush=True)
+            return None
+
     except Exception as e:
         print(f"[KROGER] search exception for '{name}': {e}", flush=True)
         return None
