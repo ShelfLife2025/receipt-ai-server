@@ -3869,6 +3869,13 @@ def _is_food_photo(photo: dict) -> bool:
         "animal", "pet", "dog", "cat", "flower", "plant", "tree", "forest",
     }
 
+    # Hard reject shelf/aisle/store photos regardless of food keywords
+    hard_reject = [
+        "supermarket aisle", "grocery aisle", "store shelf", "retail shelf",
+        "shopping aisle", "shelf", "aisle", "superstore", "hypermarket",
+        "shopping cart", "shopping basket", "checkout",
+    ]
+
     # Gather all text signals from the photo
     text_signals = []
     desc = (photo.get("description") or "").lower()
@@ -3879,6 +3886,11 @@ def _is_food_photo(photo: dict) -> bool:
         text_signals.append((tag.get("title") or "").lower())
 
     combined = " ".join(text_signals)
+
+    # Hard reject shelf/aisle photos no matter what
+    for bad in hard_reject:
+        if bad in combined:
+            return False
 
     # Reject if clearly non-food
     for bad in non_food_keywords:
@@ -3924,14 +3936,14 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
 
         # Use the right search suffix depending on item type
         if is_household:
-            suffix = "product packaging white background"
-            fallback_query = "household cleaning product packaging"
+            suffix = "product white background clean"
+            fallback_query = "household cleaning product white background"
         elif is_packaged:
-            suffix = "grocery store product packaging"
-            fallback_query = "packaged grocery food supermarket"
+            suffix = "product packaging isolated"
+            fallback_query = "packaged food product isolated"
         else:
-            suffix = "fresh grocery supermarket"
-            fallback_query = "fresh food grocery store"
+            suffix = "fresh food isolated white background"
+            fallback_query = "fresh food close up"
 
         async def _search(query: str, require_food_check: bool = True) -> Optional[str]:
             full_query = f"{query} {suffix}"
