@@ -3759,8 +3759,8 @@ def _simplify_for_unsplash(name: str) -> str:
         "land o lakes", "land o\'lakes", "breakstone\'s", "breakstones",
         "philadelphia", "velveeta", "laughing cow",
         "hellmann\'s", "hellmanns", "best foods", "duke\'s", "dukes",
-        "french\'s", "frenchs", "gulden\'s", "guldens", "heinz",
-        "wishbone", "ken\'s", "kens", "hidden valley", "ranch",
+        "french\'s", "frenchs", "gulden\'s", "guldens",
+        "wishbone", "ken\'s", "kens", "hidden valley",
         "publix", "great value", "store brand", "generic", "signature select",
         "365", "simple truth", "open nature", "o organics",
         "progresso", "swanson", "lipton", "knorr", "idahoan",
@@ -3774,23 +3774,23 @@ def _simplify_for_unsplash(name: str) -> str:
         "barilla", "ronzoni", "mueller\'s", "muellers", "de cecco",
         "bertolli", "colavita", "filippo berio",
         "dannon", "activia",
-        "bolthouse", "naked", "odwalla",
+        "bolthouse", "naked juice", "odwalla",
         "ben & jerry\'s", "ben and jerrys", "haagen-dazs", "breyers", "dreyer\'s", "dreyers",
         "talenti", "arctic zero",
-        "birds eye", "alexia", "ore-ida",
+        "alexia", "ore-ida",
         "stouffer\'s", "stouffers", "lean cuisine", "healthy choice", "marie callender\'s",
         "digorno", "digiorno", "red baron", "tombstone",
         "kashi", "special k", "cheerios", "frosted flakes", "lucky charms",
         "cap\'n crunch", "capn crunch", "cocoa puffs", "froot loops", "fruit loops",
         "honey bunches", "life cereal",
-        "thomas\'", "thomas", "arnold", "pepperidge",
+        "thomas\'", "arnold", "pepperidge",
         "wonder", "nature\'s own", "natures own", "dave\'s killer", "daves killer",
         "mission", "old el paso", "taco bell", "ortega",
         "pam", "crisco", "wesson",
         "splenda", "truvia", "equal", "sweet\'n low",
         "crystal light", "mio", "true lemon",
         "emerald", "planters", "blue diamond", "wonderful",
-        "sun-maid", "sunmaid", "craisins", "ocean spray",
+        "sun-maid", "sunmaid", "craisins",
     ]
 
     s_lower = s.lower()
@@ -3806,8 +3806,8 @@ def _simplify_for_unsplash(name: str) -> str:
 
     # Remove filler words
     fillers = ["original", "classic", "premium", "value", "family size", "mega", "super",
-               "new", "improved", "natural", "organic", "fresh", "extra", "ultra",
-               "select", "choice", "grade a", "grade b", "light", "lite", "low fat",
+               "new", "improved", "natural", "organic", "extra", "ultra",
+               "select", "choice", "grade a", "grade b", "lite", "low fat",
                "fat free", "sugar free", "reduced", "less", "more", "plus",
                "&", "and", "with", "in", "the", "a", "an", "of"]
     for filler in fillers:
@@ -3824,6 +3824,156 @@ def _simplify_for_unsplash(name: str) -> str:
 
     print(f"[UNSPLASH SIMPLIFY] '{name}' -> '{s_lower}'", flush=True)
     return s_lower
+
+
+# ── Unsplash search-type overrides ────────────────────────────────────────────
+# Maps a simplified name keyword to a precise Unsplash search query.
+# This bypasses the generic suffix logic for items we know need a specific query.
+_UNSPLASH_QUERY_OVERRIDES: dict = {
+    # Dairy / refrigerated
+    "half and half":      "half and half creamer bottle isolated white background",
+    "half-and-half":      "half and half creamer bottle isolated white background",
+    "heavy cream":        "heavy whipping cream carton isolated white background",
+    "whipping cream":     "heavy whipping cream carton isolated white background",
+    "heavy whipping cream": "heavy whipping cream carton isolated white background",
+    "sour cream":         "sour cream container isolated white background",
+    "cream cheese":       "cream cheese block isolated white background",
+    "cottage cheese":     "cottage cheese container isolated white background",
+    "butter":             "butter sticks isolated white background",
+    "milk":               "milk jug isolated white background",
+    "whole milk":         "whole milk jug isolated white background",
+    "skim milk":          "skim milk carton isolated white background",
+    "almond milk":        "almond milk carton isolated white background",
+    "oat milk":           "oat milk carton isolated white background",
+    "yogurt":             "yogurt container isolated white background",
+    "greek yogurt":       "greek yogurt container isolated white background",
+    "cheese":             "block of cheese isolated white background",
+    "cheddar cheese":     "cheddar cheese block isolated white background",
+    "parmesan cheese":    "parmesan cheese wedge isolated white background",
+    "shredded cheese":    "shredded cheddar cheese pile",
+    "mozzarella":         "fresh mozzarella cheese isolated white background",
+    "eggs":               "eggs carton isolated white background",
+    # Meat / protein
+    "ground beef":        "ground beef raw isolated white background",
+    "ground chuck":       "ground beef raw isolated white background",
+    "ground turkey":      "ground turkey raw isolated white background",
+    "chicken breast":     "raw chicken breast isolated white background",
+    "chicken cutlets":    "raw chicken cutlets isolated white background",
+    "chicken thighs":     "raw chicken thighs isolated white background",
+    "chicken wings":      "raw chicken wings isolated white background",
+    "pork chops":         "raw pork chops isolated white background",
+    "steak":              "raw steak isolated white background",
+    "salmon":             "raw salmon fillet isolated white background",
+    "tilapia":            "raw tilapia fillet isolated white background",
+    "shrimp":             "raw shrimp isolated white background",
+    "bacon":              "bacon strips isolated white background",
+    "sausage":            "sausage links isolated white background",
+    "hot dogs":           "hot dogs pack isolated white background",
+    # Produce
+    "broccoli":           "fresh broccoli head isolated white background",
+    "cauliflower":        "fresh cauliflower head isolated white background",
+    "spinach":            "fresh spinach leaves isolated white background",
+    "kale":               "fresh kale leaves isolated white background",
+    "lettuce":            "fresh lettuce head isolated white background",
+    "romaine":            "romaine lettuce isolated white background",
+    "tomatoes":           "fresh tomatoes isolated white background",
+    "tomato":             "fresh tomato isolated white background",
+    "bell pepper":        "fresh bell pepper isolated white background",
+    "red pepper":         "fresh red bell pepper isolated white background",
+    "jalapeño":           "fresh jalapeno pepper isolated white background",
+    "onion":              "fresh onion isolated white background",
+    "red onion":          "fresh red onion isolated white background",
+    "garlic":             "fresh garlic bulb isolated white background",
+    "avocado":            "fresh avocado isolated white background",
+    "cucumber":           "fresh cucumber isolated white background",
+    "celery":             "fresh celery stalks isolated white background",
+    "carrots":            "fresh carrots isolated white background",
+    "potatoes":           "fresh potatoes isolated white background",
+    "sweet potato":       "fresh sweet potato isolated white background",
+    "mushrooms":          "fresh mushrooms isolated white background",
+    "corn":               "fresh corn on the cob isolated white background",
+    "zucchini":           "fresh zucchini isolated white background",
+    "asparagus":          "fresh asparagus spears isolated white background",
+    "apples":             "fresh apples isolated white background",
+    "apple":              "fresh apple isolated white background",
+    "bananas":            "fresh bananas isolated white background",
+    "banana":             "fresh banana isolated white background",
+    "oranges":            "fresh oranges isolated white background",
+    "strawberries":       "fresh strawberries isolated white background",
+    "blueberries":        "fresh blueberries isolated white background",
+    "grapes":             "fresh grapes isolated white background",
+    "lemons":             "fresh lemons isolated white background",
+    "limes":              "fresh limes isolated white background",
+    "peaches":            "fresh peaches isolated white background",
+    "watermelon":         "fresh watermelon isolated white background",
+    "pineapple":          "fresh pineapple isolated white background",
+    "mango":              "fresh mango isolated white background",
+    # Water / beverages
+    "spring water":       "bottled water clear bottle isolated white background",
+    "water":              "water bottle isolated white background",
+    "sparkling water":    "sparkling water bottle isolated white background",
+    "orange juice":       "orange juice carton isolated white background",
+    "apple juice":        "apple juice carton isolated white background",
+    "grape juice":        "grape juice bottle isolated white background",
+    "coffee":             "coffee bag product isolated white background",
+    "coffee beans":       "coffee beans isolated white background",
+    "tea":                "tea box product isolated white background",
+    # Frozen
+    "ice cream":          "ice cream tub container isolated white background",
+    "frozen pizza":       "frozen pizza box isolated white background",
+    "frozen vegetables":  "frozen vegetables bag isolated white background",
+    "frozen fruit":       "frozen fruit bag isolated white background",
+    # Pantry staples
+    "rice":               "white rice bag isolated white background",
+    "brown rice":         "brown rice bag isolated white background",
+    "pasta":              "pasta dry box isolated white background",
+    "spaghetti":          "spaghetti pasta dry isolated white background",
+    "bread":              "bread loaf isolated white background",
+    "white bread":        "white bread loaf isolated white background",
+    "olive oil":          "olive oil bottle isolated white background",
+    "vegetable oil":      "vegetable oil bottle isolated white background",
+    "flour":              "flour bag isolated white background",
+    "sugar":              "sugar bag isolated white background",
+    "salt":               "salt container isolated white background",
+    "black pepper":       "ground black pepper container isolated white background",
+    "peanut butter":      "peanut butter jar isolated white background",
+    "jelly":              "jelly jar isolated white background",
+    "jam":                "jam jar isolated white background",
+    "honey":              "honey jar isolated white background",
+    "ketchup":            "ketchup bottle isolated white background",
+    "mustard":            "mustard bottle isolated white background",
+    "mayonnaise":         "mayonnaise jar isolated white background",
+    "hot sauce":          "hot sauce bottle isolated white background",
+    "soy sauce":          "soy sauce bottle isolated white background",
+    "salsa":              "salsa jar isolated white background",
+    "tortilla chips":     "tortilla chips bag isolated white background",
+    "chips":              "potato chips bag isolated white background",
+    "crackers":           "crackers box isolated white background",
+    "cereal":             "cereal box isolated white background",
+    "oats":               "oats container isolated white background",
+    "granola":            "granola bag isolated white background",
+    "canned tomatoes":    "canned tomatoes can isolated white background",
+    "tomato sauce":       "tomato sauce jar isolated white background",
+    "chicken broth":      "chicken broth carton isolated white background",
+    "beef broth":         "beef broth carton isolated white background",
+    "beans":              "beans can isolated white background",
+    "black beans":        "black beans can isolated white background",
+    "chickpeas":          "chickpeas can isolated white background",
+    "tuna":               "tuna can isolated white background",
+    "salmon can":         "canned salmon isolated white background",
+    "soup":               "soup can isolated white background",
+    "tomato soup":        "tomato soup can isolated white background",
+    "chicken noodle soup": "chicken noodle soup can isolated white background",
+    "protein powder":     "protein powder container isolated white background",
+    # Snacks
+    "popcorn":            "popcorn bag isolated white background",
+    "pretzels":           "pretzels bag isolated white background",
+    "trail mix":          "trail mix bag isolated white background",
+    "nuts":               "mixed nuts bag isolated white background",
+    "almonds":            "almonds bag isolated white background",
+    "cashews":            "cashews bag isolated white background",
+    "walnuts":            "walnuts bag isolated white background",
+}
 
 
 def _is_household_item(name: str) -> bool:
@@ -3846,70 +3996,105 @@ def _is_household_item(name: str) -> bool:
 
 
 def _is_food_photo(photo: dict) -> bool:
-    """Check Unsplash photo tags/description to confirm it's actually a food photo."""
+    """
+    Check Unsplash photo tags/description/alt to confirm it's a usable food or product photo.
+    Much stricter than before — rejects shelf photos, store interiors, labels/text-heavy
+    images, people photos, and anything that is clearly not the product itself.
+    """
+    # ── Build combined text from all Unsplash metadata ────────────────────────
+    desc = (photo.get("description") or "").lower()
+    alt  = (photo.get("alt_description") or "").lower()
+    tags = " ".join((t.get("title") or "").lower() for t in (photo.get("tags") or []))
+    combined = f"{desc} {alt} {tags}".strip()
+
+    # ── HARD REJECT — these phrases disqualify a photo immediately ────────────
+    # Grocery/store interior shots
+    hard_reject_phrases = [
+        "supermarket", "grocery store", "store aisle", "store shelf", "retail shelf",
+        "shopping aisle", "grocery aisle", "superstore", "hypermarket", "warehouse store",
+        "shopping cart", "shopping basket", "checkout", "convenience store",
+        "refrigerator aisle", "freezer aisle", "produce aisle", "deli counter",
+        "pantry shelf", "pantry", "kitchen shelf", "food shelf",
+        # Nutrition label / text-heavy product shots we don't want
+        "nutrition label", "nutrition facts", "ingredient list", "ingredients list",
+        "nutrition information",
+        # People / lifestyle shots
+        "person eating", "woman eating", "man eating", "child eating",
+        "woman cooking", "man cooking", "chef cooking",
+        "family dinner", "dinner table", "restaurant table", "restaurant meal",
+        # Nature / outdoor
+        "farm field", "crop field", "agriculture field", "harvest field",
+    ]
+    # Single-word hard rejects that reliably mean shelf/store photos
+    hard_reject_words = {
+        "aisle", "shelves", "supermarket", "hypermarket", "pantry",
+        "portrait", "fashion", "clothing", "architecture",
+    }
+
+    for phrase in hard_reject_phrases:
+        if phrase in combined:
+            print(f"[PHOTO CHECK] hard rejected (phrase: '{phrase}'): {combined[:80]}", flush=True)
+            return False
+
+    combined_words = set(combined.split())
+    for word in hard_reject_words:
+        if word in combined_words:
+            print(f"[PHOTO CHECK] hard rejected (word: '{word}'): {combined[:80]}", flush=True)
+            return False
+
+    # ── ACCEPT SIGNALS — photo must have at least one of these ────────────────
     food_keywords = {
-        "food", "eat", "meal", "dish", "cook", "kitchen", "ingredient", "recipe",
-        "fruit", "vegetable", "meat", "dairy", "cheese", "bread", "pasta", "rice",
-        "soup", "salad", "snack", "drink", "beverage", "juice", "milk", "cream",
-        "butter", "egg", "chicken", "beef", "pork", "fish", "seafood", "shrimp",
-        "pizza", "burger", "sandwich", "wrap", "taco", "sushi", "noodle",
-        "cake", "dessert", "chocolate", "candy", "cookie", "cereal", "oat",
-        "coffee", "tea", "wine", "beer", "sauce", "condiment", "spice", "herb",
-        "grocery", "produce", "fresh", "organic", "healthy", "nutrition",
+        # General food/product
+        "food", "ingredient", "product", "package", "packaging",
+        "container", "bottle", "jar", "can", "carton", "bag", "box", "tub",
+        # Cooking / eating context
+        "meal", "dish", "recipe", "cook", "kitchen", "eat",
+        # Produce
+        "fruit", "vegetable", "produce", "fresh", "raw",
+        # Protein
+        "meat", "chicken", "beef", "pork", "fish", "seafood", "shrimp", "egg",
+        # Dairy
+        "dairy", "cheese", "milk", "cream", "butter", "yogurt",
+        # Beverages
+        "drink", "beverage", "juice", "water", "coffee", "tea",
+        # Bread / grains
+        "bread", "pasta", "rice", "cereal", "oat", "grain",
+        # Snacks / sweets
+        "snack", "chip", "cracker", "cookie", "cake", "dessert", "chocolate",
+        "candy", "ice cream", "frozen",
+        # Condiments / pantry
+        "sauce", "condiment", "spice", "herb", "oil", "vinegar", "honey",
+        "ketchup", "mustard", "salsa", "dressing",
+        # Common produce names
         "apple", "banana", "orange", "berry", "strawberry", "tomato", "potato",
         "onion", "garlic", "pepper", "carrot", "broccoli", "spinach", "lettuce",
         "lemon", "lime", "avocado", "mushroom", "corn", "bean", "pea",
-        "yogurt", "ice cream", "frozen", "canned", "jar", "bottle", "package",
+        "grape", "peach", "mango", "pineapple", "watermelon", "zucchini",
+        # Other food words
+        "soup", "salad", "pizza", "burger", "taco", "sushi", "noodle",
+        "nutrition", "organic", "healthy",
     }
 
-    non_food_keywords = {
-        "store", "shop", "market interior", "building", "architecture", "street",
-        "person", "people", "face", "portrait", "fashion", "clothing", "outfit",
-        "nature", "landscape", "travel", "city", "office", "technology",
-        "animal", "pet", "dog", "cat", "flower", "plant", "tree", "forest",
-    }
-
-    # Hard reject shelf/aisle/store photos regardless of food keywords
-    hard_reject = [
-        "supermarket aisle", "grocery aisle", "store shelf", "retail shelf",
-        "shopping aisle", "shelf", "aisle", "superstore", "hypermarket",
-        "shopping cart", "shopping basket", "checkout",
-    ]
-
-    # Gather all text signals from the photo
-    text_signals = []
-    desc = (photo.get("description") or "").lower()
-    alt = (photo.get("alt_description") or "").lower()
-    text_signals.append(desc)
-    text_signals.append(alt)
-    for tag in photo.get("tags") or []:
-        text_signals.append((tag.get("title") or "").lower())
-
-    combined = " ".join(text_signals)
-
-    # Hard reject shelf/aisle photos no matter what
-    for bad in hard_reject:
-        if bad in combined:
-            return False
-
-    # Reject if clearly non-food
-    for bad in non_food_keywords:
-        if bad in combined and not any(good in combined for good in food_keywords):
-            return False
-
-    # Accept if any food keyword found
     if any(kw in combined for kw in food_keywords):
         return True
 
-    # If no tags at all, accept anyway (better than nothing)
+    # ── No tags at all — accept reluctantly (better than nothing) ─────────────
     if not combined.strip():
         return True
 
+    # ── Has tags but none are food-related — reject ───────────────────────────
+    print(f"[PHOTO CHECK] rejected (no food keywords): {combined[:80]}", flush=True)
     return False
 
 
 async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str]:
-    """Search Unsplash for a product photo, using the right bias for food vs household."""
+    """
+    Search Unsplash for a product photo.
+    ── Smart query logic ───────────────────────────────────────────────────────
+    1. Check _UNSPLASH_QUERY_OVERRIDES for a hand-crafted exact query
+    2. Otherwise, build a smart query from the simplified name + type-based suffix
+    3. Fall back through progressively broader queries before giving up
+    """
     try:
         access_key = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
         if not access_key:
@@ -3917,75 +4102,111 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
 
         # Simplify the name so Unsplash gets a clean keyword
         simplified = _simplify_for_unsplash(name)
+        name_lower = name.lower()
+        simplified_lower = simplified.lower()
 
-        # Detect if item is a packaged/processed product — use "packaged" suffix
-        # to avoid raw ingredient photos (e.g. raw chicken instead of packaged fillets)
+        # ── STEP 1: Check override dictionary (exact query for known items) ───────
+        # Check full simplified name first, then each word combo
+        override_query = None
+        # Try exact simplified match
+        if simplified_lower in _UNSPLASH_QUERY_OVERRIDES:
+            override_query = _UNSPLASH_QUERY_OVERRIDES[simplified_lower]
+        else:
+            # Try original name (lowercased) match
+            if name_lower in _UNSPLASH_QUERY_OVERRIDES:
+                override_query = _UNSPLASH_QUERY_OVERRIDES[name_lower]
+            else:
+                # Try to match any override key that's fully contained in the simplified name
+                # (e.g. "ground chuck" contains "ground beef" — no, but "sour cream" matches "sour cream")
+                for key, val in _UNSPLASH_QUERY_OVERRIDES.items():
+                    if key in simplified_lower or key in name_lower:
+                        override_query = val
+                        print(f"[UNSPLASH OVERRIDE] '{name}' matched key '{key}'", flush=True)
+                        break
+
+        # ── STEP 2: Build smart suffix for non-override items ───────────────────
+        # Detect item type for suffix selection
         packaged_signals = [
             "fillet", "fillets", "nugget", "nuggets", "strip", "strips", "tender", "tenders",
             "patty", "patties", "breaded", "battered", "frozen", "canned", "jarred",
-            "sliced", "shredded", "diced", "chopped", "ground", "seasoned",
+            "sliced", "shredded", "diced", "chopped", "seasoned",
             "roasted", "baked", "smoked", "cured", "deli", "luncheon",
             "sauce", "dressing", "marinade", "seasoning", "mix", "blend",
-            "cereal", "cracker", "chip", "cookie", "cake", "roll", "bread",
+            "cereal", "cracker", "chip", "cookie", "cake", "roll",
             "pasta", "noodle", "rice cake", "popcorn", "pretzel",
             "yogurt", "cream cheese", "cottage cheese", "sour cream",
             "juice", "drink", "soda", "water", "milk", "creamer",
         ]
-        name_lower_check = name.lower()
-        is_packaged = any(sig in name_lower_check for sig in packaged_signals)
+        is_packaged = any(sig in name_lower for sig in packaged_signals)
 
-        # Use the right search suffix depending on item type
         if is_household:
-            suffix = "product white background clean"
+            suffix = "product isolated white background clean"
             fallback_query = "household cleaning product white background"
         elif is_packaged:
-            suffix = "product packaging isolated"
-            fallback_query = "packaged food product isolated"
+            suffix = "product isolated white background"
+            fallback_query = "packaged food product isolated white background"
         else:
-            suffix = "fresh food isolated white background"
-            fallback_query = "fresh food close up"
+            suffix = "fresh isolated white background"
+            fallback_query = "fresh food close up isolated"
 
-        async def _search(query: str, require_food_check: bool = True) -> Optional[str]:
-            full_query = f"{query} {suffix}"
-            encoded = urllib.parse.quote(full_query.strip())
-            url = f"https://api.unsplash.com/search/photos?query={encoded}&per_page=10&orientation=squarish&content_filter=high"
+        # ── Inner search helper ─────────────────────────────────────────────────
+        async def _search(query: str, append_suffix: bool = True, require_food_check: bool = True) -> Optional[str]:
+            full_query = f"{query} {suffix}".strip() if append_suffix else query
+            encoded = urllib.parse.quote(full_query)
+            url = (
+                f"https://api.unsplash.com/search/photos"
+                f"?query={encoded}&per_page=15&orientation=squarish&content_filter=high"
+            )
             async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as uc:
                 resp = await uc.get(url, headers={"Authorization": f"Client-ID {access_key}"})
-                if resp.status_code == 200:
-                    data = resp.json()
-                    results = data.get("results", [])
-                    for photo in results:
-                        img_url = (photo.get("urls") or {}).get("regular") or (photo.get("urls") or {}).get("small")
-                        if not img_url or not img_url.startswith("http"):
-                            continue
-                        # For food items only, filter out non-food photos
-                        if not is_household and require_food_check and not _is_food_photo(photo):
-                            print(f"[UNSPLASH] rejected non-food photo for '{query}'", flush=True)
-                            continue
-                        print(f"[UNSPLASH] found image for '{query}': {img_url}", flush=True)
-                        return img_url
-                    print(f"[UNSPLASH] no photo found for '{query}'", flush=True)
-                else:
-                    print(f"[UNSPLASH] error status={resp.status_code} for '{query}'", flush=True)
+                if resp.status_code != 200:
+                    print(f"[UNSPLASH] HTTP {resp.status_code} for '{full_query}'", flush=True)
+                    return None
+                results = resp.json().get("results", [])
+                for photo in results:
+                    img_url = (
+                        (photo.get("urls") or {}).get("regular")
+                        or (photo.get("urls") or {}).get("small")
+                    )
+                    if not img_url or not img_url.startswith("http"):
+                        continue
+                    if require_food_check and not _is_food_photo(photo):
+                        print(f"[UNSPLASH] rejected photo for '{full_query}'", flush=True)
+                        continue
+                    print(f"[UNSPLASH] ✅ found for '{full_query}': {img_url[:60]}", flush=True)
+                    return img_url
+                print(f"[UNSPLASH] no valid photo for '{full_query}'", flush=True)
             return None
 
-        # Try simplified name first
+        # ── STEP 3: Run searches in priority order ──────────────────────────────
+
+        # Priority 1: Override query (hand-crafted, no suffix added — it's already complete)
+        if override_query:
+            img_url = await _search(override_query, append_suffix=False)
+            if img_url:
+                return img_url
+
+        # Priority 2: Simplified name + suffix
         img_url = await _search(simplified)
+        if img_url:
+            return img_url
 
-        # Try just the last 2 words (e.g. "cheddar cheese" or "paper towel")
-        if not img_url and len(simplified.split()) > 2:
-            short = " ".join(simplified.split()[-2:])
+        # Priority 3: Last 2 words of simplified name + suffix
+        words = simplified.split()
+        if len(words) > 2:
+            short = " ".join(words[-2:])
             img_url = await _search(short)
+            if img_url:
+                return img_url
 
-        # Try first word only
-        if not img_url:
-            first = simplified.split()[0] if simplified.split() else simplified
-            img_url = await _search(first)
+        # Priority 4: First meaningful word + suffix
+        if words:
+            img_url = await _search(words[0])
+            if img_url:
+                return img_url
 
-        # Absolute last resort — generic fallback, skip food check
-        if not img_url:
-            img_url = await _search(fallback_query, require_food_check=False)
-
+        # Priority 5: Generic fallback, skip food check
+        img_url = await _search(fallback_query, append_suffix=False, require_food_check=False)
         return img_url
 
     except Exception as e:
@@ -4137,83 +4358,144 @@ async def _freepik_image(name: str) -> Optional[str]:
 
 
 async def _kroger_image(name: str) -> Optional[str]:
+    """
+    Search Kroger API for a product image.
+    ── Smart matching rules ───────────────────────────────────────────────────────
+    1. Extract "core" tokens from the item name (the noun, not adjectives/brands)
+    2. ALL core tokens must be present in the Kroger product description
+    3. Reject /0001111 store brand images and images without an http URL
+    4. If strict match fails, try a simplified 1-2 word search as a fallback
+    """
     token = await _kroger_get_token()
     if not token:
         return None
 
-    # Build a set of meaningful words from the search name for relevance checking
+    # Words to completely ignore during matching
     _stop_words = {
         "a", "an", "the", "and", "or", "of", "with", "in", "on", "for", "to",
         "oz", "lb", "ct", "pk", "pack", "bottle", "bottles", "bag", "bags",
         "box", "can", "jar", "gallon", "fl", "g", "kg", "ml", "liter",
-        "count", "organic", "fresh", "large", "small", "medium"
+        "count", "organic", "fresh", "large", "small", "medium",
+        # Adjective/quality words that don't identify the product
+        "grade", "premium", "select", "choice", "natural", "original",
+        "classic", "regular", "extra", "super", "ultra", "value",
+        "new", "improved", "lite", "light", "reduced", "low", "fat", "free",
+        "sugar", "sodium", "calorie",
     }
-    search_tokens = set(
-        w for w in re.sub(r"[^a-z0-9\s]", " ", name.lower()).split()
-        if w not in _stop_words and len(w) >= 3
-    )
 
-    try:
-        search_term = urllib.parse.quote(name)
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            r = await client.get(
-                f"https://api.kroger.com/v1/products?filter.term={search_term}&filter.limit=5",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                },
-            )
-            if r.status_code != 200:
-                print(f"[KROGER] search error status={r.status_code} for '{name}'", flush=True)
-                return None
+    def _tokenize(text: str) -> set:
+        return {
+            w for w in re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+            if w not in _stop_words and len(w) >= 3
+        }
 
-            data = r.json()
-            products = data.get("data", [])
-            if not products:
-                print(f"[KROGER] no products found for '{name}'", flush=True)
-                return None
+    # Core search tokens — what the product fundamentally IS
+    search_tokens = _tokenize(name)
 
-            for product in products:
-                # Get the product description from Kroger to check relevance
-                description = (product.get("description") or "").lower().strip()
-                brand = (product.get("brand") or "").lower().strip()
-                full_text = f"{brand} {description}".strip()
+    # ── Identify "must-match" core nouns from the item name ───────────────────
+    # These are the defining words (e.g. for "sour cream" both "sour" and "cream"
+    # must be in the Kroger product, not just any shared word like "spring").
+    # For names with 1-2 meaningful words, ALL must match.
+    # For names with 3+ meaningful words, at least 2 must match.
+    core_tokens = search_tokens  # default: all tokens must match
+    min_overlap_needed = len(search_tokens)  # require full overlap by default
+    if len(search_tokens) >= 3:
+        min_overlap_needed = max(2, len(search_tokens) - 1)  # allow 1 miss for longer names
 
-                if not description:
-                    continue
-
-                product_tokens = set(
-                    w for w in re.sub(r"[^a-z0-9\s]", " ", full_text).split()
-                    if w not in _stop_words and len(w) >= 3
+    async def _search_kroger(search_name: str, tokens: set, min_overlap: int) -> Optional[str]:
+        """Perform one Kroger search and return the best matching image URL."""
+        try:
+            search_term = urllib.parse.quote(search_name)
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                r = await client.get(
+                    f"https://api.kroger.com/v1/products?filter.term={search_term}&filter.limit=8",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    },
                 )
+                if r.status_code != 200:
+                    print(f"[KROGER] HTTP {r.status_code} for '{search_name}'", flush=True)
+                    return None
 
-                # Must share at least 1 meaningful word with what we searched
-                overlap = search_tokens & product_tokens
-                if not overlap:
-                    print(f"[KROGER] rejected '{description}' — no word overlap with '{name}'", flush=True)
-                    continue
+                products = r.json().get("data", [])
+                if not products:
+                    print(f"[KROGER] no products for '{search_name}'", flush=True)
+                    return None
 
-                # Get the image from this matching product
-                images = product.get("images", [])
-                for img in images:
-                    sizes = img.get("sizes", [])
-                    for sz in sizes:
-                        url = sz.get("url", "")
-                        if not url or not url.startswith("http"):
-                            continue
-                        # Reject store brand mascot images
-                        if "/0001111" in url:
-                            print(f"[KROGER] rejected store brand URL for '{name}': {url}", flush=True)
-                            continue
-                        print(f"[KROGER] found image for '{name}' matched '{description}': {url}", flush=True)
-                        return url
+                for product in products:
+                    description = (product.get("description") or "").lower().strip()
+                    brand       = (product.get("brand")       or "").lower().strip()
+                    full_text   = f"{brand} {description}".strip()
 
-            print(f"[KROGER] no valid match found for '{name}'", flush=True)
+                    if not description:
+                        continue
+
+                    product_tokens = _tokenize(full_text)
+
+                    # Count how many of our search tokens appear in this product
+                    overlap = tokens & product_tokens
+                    overlap_count = len(overlap)
+
+                    if overlap_count < min_overlap:
+                        print(
+                            f"[KROGER] rejected '{description}' — overlap={overlap_count}/{min_overlap} "
+                            f"(need {min_overlap}) for '{search_name}'",
+                            flush=True
+                        )
+                        continue
+
+                    # Good match — find the best image
+                    images = product.get("images", [])
+
+                    # Prefer "front" perspective images, then any other
+                    def image_priority(img_obj):
+                        perspective = (img_obj.get("perspective") or "").lower()
+                        return 0 if perspective == "front" else 1
+
+                    for img in sorted(images, key=image_priority):
+                        sizes = img.get("sizes", []) or []
+                        # Prefer larger sizes: xlarge > large > medium > small > thumbnail
+                        size_order = {"xlarge": 0, "large": 1, "medium": 2, "small": 3, "thumbnail": 4}
+                        for sz in sorted(sizes, key=lambda s: size_order.get((s.get("size") or "").lower(), 99)):
+                            url = (sz.get("url") or "").strip()
+                            if not url or not url.startswith("http"):
+                                continue
+                            # Reject store brand /0001111 mascot images
+                            if "/0001111" in url:
+                                print(f"[KROGER] rejected store brand URL for '{search_name}': {url[:60]}", flush=True)
+                                continue
+                            print(
+                                f"[KROGER] ✅ matched '{description}' (overlap={overlap_count}) for '{search_name}': {url[:60]}",
+                                flush=True
+                            )
+                            return url
+
+                print(f"[KROGER] no valid match for '{search_name}'", flush=True)
+                return None
+
+        except Exception as e:
+            print(f"[KROGER] exception for '{search_name}': {e}", flush=True)
             return None
 
-    except Exception as e:
-        print(f"[KROGER] search exception for '{name}': {e}", flush=True)
-        return None
+    # ── Attempt 1: Full name, require all core tokens to match ──────────────────
+    result = await _search_kroger(name, core_tokens, min_overlap_needed)
+    if result:
+        return result
+
+    # ── Attempt 2: Simplified 1-2 word fallback ───────────────────────────────
+    # Use the simplified Unsplash name as a fallback search term
+    simplified = _simplify_for_unsplash(name)
+    if simplified and simplified.lower() != name.lower():
+        simplified_tokens = _tokenize(simplified)
+        if simplified_tokens:
+            # Require all simplified tokens to match (they're already stripped down)
+            result = await _search_kroger(simplified, simplified_tokens, len(simplified_tokens))
+            if result:
+                return result
+
+    print(f"[KROGER] ❌ no image found for '{name}'", flush=True)
+    return None
 
 
 @app.get("/image")
