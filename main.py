@@ -827,6 +827,12 @@ PACKSHOT_SERVICE_KEY = (os.getenv("PACKSHOT_SERVICE_KEY") or "").strip()
 
 KROGER_CLIENT_ID = (os.getenv("KROGER_CLIENT_ID") or "").strip()
 KROGER_CLIENT_SECRET = (os.getenv("KROGER_CLIENT_SECRET") or "").strip()
+
+# Edamam API keys
+EDAMAM_FOOD_APP_ID  = (os.getenv("EDAMAM_FOOD_APP_ID")  or "").strip()
+EDAMAM_FOOD_APP_KEY = (os.getenv("EDAMAM_FOOD_APP_KEY") or "").strip()
+EDAMAM_RECIPE_APP_ID  = (os.getenv("EDAMAM_RECIPE_APP_ID")  or "").strip()
+EDAMAM_RECIPE_APP_KEY = (os.getenv("EDAMAM_RECIPE_APP_KEY") or "").strip()
 _kroger_token: Optional[str] = None
 _kroger_token_expiry: float = 0.0
 
@@ -4331,6 +4337,74 @@ async def _google_product_image(name: str) -> Optional[str]:
     return None
 
 
+async def _edamam_food_image(name: str) -> Optional[str]:
+    """Search Edamam Food Database API for a food photo."""
+    if not EDAMAM_FOOD_APP_ID or not EDAMAM_FOOD_APP_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            params = {
+                "app_id":  EDAMAM_FOOD_APP_ID,
+                "app_key": EDAMAM_FOOD_APP_KEY,
+                "ingr":    name,
+            }
+            resp = await client.get("https://api.edamam.com/api/food-database/v2/parser", params=params)
+            if resp.status_code != 200:
+                print(f"[EDAMAM FOOD] HTTP {resp.status_code} for '{name}'", flush=True)
+                return None
+            data = resp.json()
+            hints = data.get("hints", [])
+            for hint in hints[:5]:
+                food = hint.get("food", {})
+                img = food.get("image", "")
+                if img and img.startswith("http"):
+                    print(f"[EDAMAM FOOD] ✅ found image for '{name}': {img[:60]}", flush=True)
+                    return img
+            # Also check parsed item
+            for parsed in data.get("parsed", []):
+                food = parsed.get("food", {})
+                img = food.get("image", "")
+                if img and img.startswith("http"):
+                    print(f"[EDAMAM FOOD] ✅ parsed image for '{name}': {img[:60]}", flush=True)
+                    return img
+            print(f"[EDAMAM FOOD] no image found for '{name}'", flush=True)
+            return None
+    except Exception as e:
+        print(f"[EDAMAM FOOD] error for '{name}': {e}", flush=True)
+        return None
+
+
+async def _edamam_recipe_image(name: str) -> Optional[str]:
+    """Search Edamam Recipe API for a recipe photo."""
+    if not EDAMAM_RECIPE_APP_ID or not EDAMAM_RECIPE_APP_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            params = {
+                "app_id":  EDAMAM_RECIPE_APP_ID,
+                "app_key": EDAMAM_RECIPE_APP_KEY,
+                "type":    "public",
+                "q":       name,
+            }
+            resp = await client.get("https://api.edamam.com/api/recipes/v2", params=params)
+            if resp.status_code != 200:
+                print(f"[EDAMAM RECIPE] HTTP {resp.status_code} for '{name}'", flush=True)
+                return None
+            data = resp.json()
+            hits = data.get("hits", [])
+            for hit in hits[:5]:
+                recipe = hit.get("recipe", {})
+                img = recipe.get("image", "")
+                if img and img.startswith("http"):
+                    print(f"[EDAMAM RECIPE] ✅ found image for '{name}': {img[:60]}", flush=True)
+                    return img
+            print(f"[EDAMAM RECIPE] no image found for '{name}'", flush=True)
+            return None
+    except Exception as e:
+        print(f"[EDAMAM RECIPE] error for '{name}': {e}", flush=True)
+        return None
+
+
 async def _freepik_image(name: str) -> Optional[str]:
     """Search Freepik stock photos by name."""
     try:
@@ -4586,7 +4660,20 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception as e:
             print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
 
-    # ── STEP 3: Freepik (last resort) ────────────────────────────────────────
+    # ── STEP 3: Edamam Food Database (real food photos, clean on white) ────────
+    if not img_url and not is_household:
+        try:
+            img_url = await _edamam_food_image(name)
+        except Exception as e:
+            print(f"[EDAMAM FOOD IMAGE] error for '{name}': {e}", flush=True)
+
+    if not img_url and not is_household and stripped_name:
+        try:
+            img_url = await _edamam_food_image(stripped_name)
+        except Exception:
+            pass
+
+    # ── STEP 4: Freepik (last resort) ────────────────────────────────────────
     if not img_url:
         try:
             img_url = await _freepik_image(name)
@@ -4786,9 +4873,12 @@ Only return the JSON array. No markdown, no explanation, no code blocks."""
                 if not isinstance(parsed, list):
                     continue
 
-                # Build suggestions — fetch photo from Unsplash for each
+                # Build suggestions — fetch photo from Edamam first, fall back to Unsplash
                 async def fetch_photo(title: str) -> Optional[str]:
-                    return await _unsplash_image(title)
+                    photo = await _edamam_recipe_image(title)
+                    if not photo:
+                        photo = await _unsplash_image(title)
+                    return photo
 
                 photo_tasks = [fetch_photo(item.get("title", "")) for item in parsed]
                 photos = await asyncio.gather(*photo_tasks)
@@ -4889,10 +4979,12 @@ Only return the JSON object. No markdown, no explanation, no code blocks."""
                 raw = raw.strip()
                 parsed = json.loads(raw)
 
-                # Fetch photo from Unsplash
+                # Fetch photo from Edamam first, fall back to Unsplash
                 photo_url = None
                 try:
-                    photo_url = await _unsplash_image(req.title)
+                    photo_url = await _edamam_recipe_image(req.title)
+                    if not photo_url:
+                        photo_url = await _unsplash_image(req.title)
                 except Exception:
                     pass
 
