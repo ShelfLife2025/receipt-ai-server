@@ -4375,10 +4375,16 @@ async def _edamam_food_image(name: str) -> Optional[str]:
 
 
 async def _edamam_recipe_image(name: str) -> Optional[str]:
-    """Search Edamam Recipe API for a recipe photo."""
+    """Search Edamam Recipe API for a recipe photo.
+    Only returns an image if the recipe title is a reasonable match for the search term.
+    """
     if not EDAMAM_RECIPE_APP_ID or not EDAMAM_RECIPE_APP_KEY:
         return None
     try:
+        # Build a set of meaningful words from the search name for relevance checking
+        stop = {"a", "an", "the", "and", "or", "of", "with", "in", "on", "for", "to", "de", "la"}
+        name_tokens = {w.lower() for w in re.split(r"\W+", name) if w and w.lower() not in stop and len(w) > 2}
+
         async with httpx.AsyncClient(timeout=8.0) as client:
             params = {
                 "app_id":  EDAMAM_RECIPE_APP_ID,
@@ -4396,13 +4402,21 @@ async def _edamam_recipe_image(name: str) -> Optional[str]:
                 return None
             data = resp.json()
             hits = data.get("hits", [])
-            for hit in hits[:5]:
+            for hit in hits[:8]:
                 recipe = hit.get("recipe", {})
                 img = recipe.get("image", "")
-                if img and img.startswith("http"):
-                    print(f"[EDAMAM RECIPE] ✅ found image for '{name}': {img[:60]}", flush=True)
-                    return img
-            print(f"[EDAMAM RECIPE] no image found for '{name}'", flush=True)
+                recipe_title = recipe.get("label", "")
+                if not img or not img.startswith("http"):
+                    continue
+                # Check relevance — at least one meaningful word from the search
+                # must appear in the recipe title
+                title_lower = recipe_title.lower()
+                if name_tokens and not any(tok in title_lower for tok in name_tokens):
+                    print(f"[EDAMAM RECIPE] skipping irrelevant result '{recipe_title}' for '{name}'", flush=True)
+                    continue
+                print(f"[EDAMAM RECIPE] ✅ found image for '{name}' via '{recipe_title}': {img[:60]}", flush=True)
+                return img
+            print(f"[EDAMAM RECIPE] no relevant image found for '{name}'", flush=True)
             return None
     except Exception as e:
         print(f"[EDAMAM RECIPE] error for '{name}': {e}", flush=True)
@@ -4657,14 +4671,7 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 2: Unsplash (fallback for fresh produce / items Kroger doesn't have) ──
-    if not img_url:
-        try:
-            img_url = await _unsplash_image(name, is_household=is_household)
-        except Exception as e:
-            print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
-
-    # ── STEP 3: Edamam Food Database (real food photos, clean on white) ────────
+    # ── STEP 2: Edamam Food Database (real food photos, accurate matches) ─────
     if not img_url and not is_household:
         try:
             img_url = await _edamam_food_image(name)
@@ -4677,7 +4684,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 4: Freepik (last resort) ────────────────────────────────────────
+    # ── STEP 3: Unsplash (last resort before Freepik) ─────────────────────────
+    if not img_url:
+        try:
+            img_url = await _unsplash_image(name, is_household=is_household)
+        except Exception as e:
+            print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
+
+    # ── STEP 4: Freepik (dead last resort) ───────────────────────────────────
     if not img_url:
         try:
             img_url = await _freepik_image(name)
@@ -4877,11 +4891,12 @@ Only return the JSON array. No markdown, no explanation, no code blocks."""
                 if not isinstance(parsed, list):
                     continue
 
-                # Build suggestions — fetch photo from Edamam first, fall back to Unsplash
+                # Build suggestions — Edamam recipe image first, then Unsplash with food hint
                 async def fetch_photo(title: str) -> Optional[str]:
                     photo = await _edamam_recipe_image(title)
                     if not photo:
-                        photo = await _unsplash_image(title)
+                        # Append "food dish" so Unsplash returns a plated meal, not random
+                        photo = await _unsplash_image(title + " food dish")
                     return photo
 
                 photo_tasks = [fetch_photo(item.get("title", "")) for item in parsed]
@@ -4983,12 +4998,12 @@ Only return the JSON object. No markdown, no explanation, no code blocks."""
                 raw = raw.strip()
                 parsed = json.loads(raw)
 
-                # Fetch photo from Edamam first, fall back to Unsplash
+                # Fetch photo from Edamam first, fall back to Unsplash with food hint
                 photo_url = None
                 try:
                     photo_url = await _edamam_recipe_image(req.title)
                     if not photo_url:
-                        photo_url = await _unsplash_image(req.title)
+                        photo_url = await _unsplash_image(req.title + " food dish")
                 except Exception:
                     pass
 
