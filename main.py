@@ -4386,7 +4386,11 @@ async def _edamam_recipe_image(name: str) -> Optional[str]:
                 "type":    "public",
                 "q":       name,
             }
-            resp = await client.get("https://api.edamam.com/api/recipes/v2", params=params)
+            resp = await client.get(
+                "https://api.edamam.com/api/recipes/v2",
+                params=params,
+                headers={"Accept": "application/json"}
+            )
             if resp.status_code != 200:
                 print(f"[EDAMAM RECIPE] HTTP {resp.status_code} for '{name}'", flush=True)
                 return None
