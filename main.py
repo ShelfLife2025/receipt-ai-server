@@ -590,6 +590,17 @@ For each item return these 4 fields:
 - expires_in_days: integer number of days until expiration from purchase
 - storage: one of "fridge", "freezer", or "pantry"
 - category: either "Food" or "Household"
+  CRITICAL — classify every single item. Think carefully. Use these exact rules:
+  HOUSEHOLD (not edible, not drinkable — used for cleaning, personal care, paper products, or pets):
+    Paper products: Bounty, Charmin, Scott, Kleenex, paper towels, toilet paper, napkins, tissues
+    Cleaning: Tide, Gain, Downy, Bounce, Lysol, Febreze, Dawn, Cascade, Windex, Clorox, Swiffer, Fabuloso, Mr. Clean, bleach, dish soap, laundry detergent, dryer sheets, fabric softener, sponges, scrub brushes
+    Personal care: Cremo, Old Spice, Dove, Pantene, Head & Shoulders, shampoo, conditioner, body wash, deodorant, toothpaste, toothbrush, floss, mouthwash, razors, shaving cream, lotion, soap bars
+    Pet supplies: Fresh Step, Tidy Cats, arm & hammer litter, cat litter, dog food, cat food, pet treats, flea treatment
+    Household misc: trash bags, garbage bags, aluminum foil, plastic wrap, ziplock bags, batteries, light bulbs, matches, cotton balls, cotton swabs
+  FOOD (anything you eat or drink — even snacks, candy, supplements, baby formula, alcohol, soda):
+    All meats, fish, dairy, eggs, produce, bread, cereal, snacks, beverages, condiments, frozen meals, canned goods, candy, ice cream, baby formula, protein powder, vitamins/supplements
+    Alcohol of all kinds counts as Food
+    When in doubt: if a human consumes it by eating or drinking it, it is Food
 
 SHELF LIFE REFERENCE — use the most specific match for the item:
 
@@ -748,10 +759,11 @@ Respond with ONLY a valid JSON array, no markdown."""
                     gemini_words = len(gemini_full_name.split()) if gemini_full_name else 0
                     if gemini_full_name and len(gemini_full_name) >= 3 and gemini_words >= existing_words:
                         item["name"] = gemini_full_name
-                    # Always use our own classifier for category — Gemini gets this wrong
-                    # (e.g. it calls Cremo barber wash "Food"). Our HOUSEHOLD_WORDS list is authoritative.
                     final_name_for_classify = item["name"]
-                    our_category = _classify(final_name_for_classify)
+                    # Use Gemini's category answer — it's trained on all of this context
+                    # Fall back to keyword classifier only if Gemini returned something invalid
+                    gemini_category = (result.get("category") or "").strip()
+                    our_category = gemini_category if gemini_category in ("Food", "Household") else _classify(final_name_for_classify)
                     # Rules engine is the authority on shelf life — Gemini only provides the clean name
                     rules = _rules_lookup(final_name_for_classify)
                     if rules:
