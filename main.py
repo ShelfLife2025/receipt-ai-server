@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File,  HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from google.cloud import vision
 import google.generativeai as genai
@@ -3943,7 +3943,10 @@ _UNSPLASH_QUERY_OVERRIDES: dict = {
     "potatoes":           "fresh potatoes isolated white background",
     "sweet potato":       "fresh sweet potato isolated white background",
     "mushrooms":          "fresh mushrooms isolated white background",
-    "corn":               "fresh corn on the cob isolated white background",
+    "yellow corn":        "fresh yellow sweet corn on the cob isolated white background",
+    "sweet corn":         "fresh sweet corn on the cob isolated white background",
+    "corn on the cob":    "fresh corn on the cob isolated white background",
+    "corn":               "fresh yellow sweet corn on the cob isolated white background",
     "zucchini":           "fresh zucchini isolated white background",
     "asparagus":          "fresh asparagus spears isolated white background",
     "apples":             "fresh apples isolated white background",
@@ -4025,6 +4028,23 @@ _UNSPLASH_QUERY_OVERRIDES: dict = {
     "almonds":            "almonds bag isolated white background",
     "cashews":            "cashews bag isolated white background",
     "walnuts":            "walnuts bag isolated white background",
+    # Household — cat litter and cleaning products
+    "clump and seal":     "arm hammer clump seal cat litter box product",
+    "clump & seal":       "arm hammer clump seal cat litter box product",
+    "cat litter":         "cat litter box product isolated white background",
+    "fresh step":         "fresh step cat litter box product",
+    "tidy cats":          "tidy cats cat litter box product",
+    "arm hammer litter":  "arm hammer cat litter box product",
+    "paper towels":       "paper towels roll isolated white background",
+    "bounty":             "bounty paper towels roll isolated white background",
+    "charmin":            "charmin toilet paper roll isolated white background",
+    "toilet paper":       "toilet paper rolls isolated white background",
+    "tide":               "tide laundry detergent bottle isolated white background",
+    "gain":               "gain laundry detergent bottle isolated white background",
+    "dawn dish soap":     "dawn dish soap bottle isolated white background",
+    "cascade":            "cascade dishwasher pods box isolated white background",
+    "lysol":              "lysol cleaning spray bottle isolated white background",
+    "clorox":             "clorox cleaning spray bottle isolated white background",
 }
 
 
