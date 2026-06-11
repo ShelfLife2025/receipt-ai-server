@@ -4189,15 +4189,15 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
             # Try original name (lowercased) match
             if name_lower in _UNSPLASH_QUERY_OVERRIDES:
                 override_query = _UNSPLASH_QUERY_OVERRIDES[name_lower]
-            else:
+                        else:
                 # Try to match any override key that's fully contained in the simplified name
-                # (e.g. "ground chuck" contains "ground beef" — no, but "sour cream" matches "sour cream")
-                for key, val in _UNSPLASH_QUERY_OVERRIDES.items():
+                # Sort by key length descending so longer/more-specific keys win first
+                for key, val in sorted(_UNSPLASH_QUERY_OVERRIDES.items(), key=lambda x: len(x[0]), reverse=True):
                     if key in simplified_lower or key in name_lower:
                         override_query = val
                         print(f"[UNSPLASH OVERRIDE] '{name}' matched key '{key}'", flush=True)
                         break
-
+                        
         # ── STEP 2: Build smart suffix for non-override items ───────────────────
         # Detect item type for suffix selection
         packaged_signals = [
