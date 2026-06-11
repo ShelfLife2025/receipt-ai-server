@@ -3649,12 +3649,13 @@ async def parse_receipt_debug(
 @app.post("/instacart/create_list/")
 async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, str]:
     api_key = (os.getenv("INSTACART_API_KEY") or "").strip()
-       if not api_key:
+    if not api_key:
         raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY env var on server")
 
     items = _normalized_instacart_items(req)
     if not items:
         raise HTTPException(status_code=422, detail="Field required: items")
+
     expanded_names = await asyncio.gather(*[_expand_receipt_name(i.name) for i in items])
 
     payload = {
