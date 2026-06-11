@@ -4190,7 +4190,7 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
             # Try original name (lowercased) match
             if name_lower in _UNSPLASH_QUERY_OVERRIDES:
                 override_query = _UNSPLASH_QUERY_OVERRIDES[name_lower]
-                        else:
+            else:
                 # Try to match any override key that's fully contained in the simplified name
                 # Sort by key length descending so longer/more-specific keys win first
                 for key, val in sorted(_UNSPLASH_QUERY_OVERRIDES.items(), key=lambda x: len(x[0]), reverse=True):
