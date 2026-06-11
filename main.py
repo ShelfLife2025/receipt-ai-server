@@ -3652,14 +3652,16 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing INSTACART_API_KEY env var on server")
 
-    items = _normalized_instacart_items(req)
+        items = _normalized_instacart_items(req)
     if not items:
         raise HTTPException(status_code=422, detail="Field required: items")
+
+    expanded_names = await asyncio.gather(*[_expand_receipt_name(i.name) for i in items])
 
     payload = {
         "title": req.title,
         "link_type": "shopping_list",
-        "line_items": [{"name": i.name, "quantity": i.quantity, "unit": i.unit} for i in items],
+        "line_items": [{"name": expanded_names[idx], "quantity": i.quantity, "unit": i.unit} for idx, i in enumerate(items)],
     }
 
     url = INSTACART_PRODUCTS_LINK_URL
