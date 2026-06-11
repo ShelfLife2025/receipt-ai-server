@@ -3945,6 +3945,7 @@ _UNSPLASH_QUERY_OVERRIDES: dict = {
     "potatoes":           "fresh potatoes isolated white background",
     "sweet potato":       "fresh sweet potato isolated white background",
     "mushrooms":          "fresh mushrooms isolated white background",
+    "corn yellow":        "fresh yellow sweet corn on the cob isolated white background",
     "yellow corn":        "fresh yellow sweet corn on the cob isolated white background",
     "sweet corn":         "fresh sweet corn on the cob isolated white background",
     "corn on the cob":    "fresh corn on the cob isolated white background",
@@ -4319,7 +4320,9 @@ async def _expand_receipt_name(name: str) -> str:
             f"'Ny Xsh Cheddar' -> 'New York Extra Sharp Cheddar', "
             f"'Dipped Straw' -> 'Chocolate Dipped Strawberries', "
             f"'Hvy Whp Crm' -> 'Heavy Whipping Cream', "
-            f"'Buitoni Pes Bas Sauce' -> 'Buitoni Pesto Basil Sauce'\n"
+            f"'Buitoni Pes Bas Sauce' -> 'Buitoni Pesto Basil Sauce', "
+            f"'Corn Yellow' -> 'Yellow Corn', 'Straw Bry' -> 'Strawberries', "
+            f"'Grn Bns' -> 'Green Beans'\n"
             f"Expanded name:"
         )
         # 3 second timeout — if Gemini is slow, just use the original name
