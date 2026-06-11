@@ -585,10 +585,13 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
         )
         prompt = f"""You are an expert food scientist and grocery store assistant. For each item below, return a JSON array in the same order as the input.
 
-For each item return these 4 fields:
+For each item return these 6 fields:
 - full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand all abbreviations including brand abbreviations. Example: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon", "SBR BUFF WG MARIND" -> "Sweet Baby Ray's Buffalo Wing Marinade", "KH PRETZEL BUNS" -> "King's Hawaiian Pretzel Buns", "PBX PARMESAN WEDGE" -> "Publix Parmesan Wedge", "FRSH STP XTRM ODOR" -> "Fresh Step Extreme Odor Control Cat Litter", "KH SAVORY DIN ROLL" -> "King's Hawaiian Savory Dinner Rolls". If the name is already clean, return it as-is.
-- expires_in_days: integer number of days until expiration from purchase
-- storage: one of "fridge", "freezer", or "pantry"
+- expires_in_days: integer days from purchase until expiration using the default storage method below
+- storage: the recommended storage location — one of "fridge", "freezer", or "pantry"
+- fridge: integer days the item lasts in the fridge, or null if fridge storage is not safe/applicable
+- freezer: integer days the item lasts in the freezer, or null if freezer storage is not safe/applicable
+- pantry: integer days the item lasts in the pantry, or null if pantry storage is not safe/applicable
 - category: either "Food" or "Household"
   CRITICAL — classify every single item. Think carefully. Use these exact rules:
   HOUSEHOLD (not edible, not drinkable — used for cleaning, personal care, paper products, or pets):
@@ -764,28 +767,59 @@ Respond with ONLY a valid JSON array, no markdown."""
                     # Fall back to keyword classifier only if Gemini returned something invalid
                     gemini_category = (result.get("category") or "").strip()
                     our_category = gemini_category if gemini_category in ("Food", "Household") else _classify(final_name_for_classify)
-                    # Rules engine is the authority on shelf life — Gemini only provides the clean name
-                    rules = _rules_lookup(final_name_for_classify)
-                    if rules:
-                        shelf_days = rules["expires_in_days"]
-                        shelf_storage = rules["storage"]
-                        shelf_confidence = rules.get("confidence", "medium")
+                    # Gemini is the authority on shelf life — it has the full reference table
+                    # and knows the specific product/brand. Our rules DB is only a safety fallback.
+                    gemini_days_raw = result.get("expires_in_days")
+                    gemini_storage_raw = result.get("storage", "fridge")
+                    gemini_storage = gemini_storage_raw if gemini_storage_raw in valid_storages else "fridge"
+
+                    # Sanity-check Gemini's answer against hard safety limits
+                    name_l = final_name_for_classify.lower()
+                    is_raw_meat = any(w in name_l for w in ["raw","chicken","beef","pork","turkey","fish","shrimp","salmon","tilapia","cod","halibut","ground meat","ground beef","ground turkey","ground pork","ground chicken","steak","lamb","scallop","crab","lobster"])
+                    is_meat = any(w in name_l for w in ["chicken","beef","pork","turkey","fish","shrimp","salmon","steak","ground","bacon","deli","sausage","ham","lamb","veal","brisket"])
+                    is_dairy = any(w in name_l for w in ["milk","cream","yogurt","butter","cheese","kefir","half-and-half"])
+                    is_pantry_only = any(w in name_l for w in ["seltzer","litter","detergent","vodka","whiskey","rum","tequila","gin","liquor","cleaner","soap","shampoo","white claw","truly","nutrl","hard lemonade"])
+
+                    if gemini_days_raw is not None:
+                        shelf_days = int(gemini_days_raw)
+                        # Safety cap: raw meat/fish must never exceed 7 days fridge
+                        if is_raw_meat and gemini_storage == "fridge" and shelf_days > 7:
+                            shelf_days = 4
+                        # Global cap: nothing perishable exceeds 365 days
+                        shelf_days = min(shelf_days, 365)
+                        shelf_storage = gemini_storage
+                        shelf_confidence = "high"
                     else:
-                        # Fall back to Gemini's estimate only if rules has no match
-                        # Cap at 365 days — Gemini occasionally hallucinates huge values
-                        shelf_days = min(int(result.get("expires_in_days", 14)), 365)
-                        shelf_storage = result.get("storage", "fridge") if result.get("storage") in valid_storages else "fridge"
-                        shelf_confidence = "low"
-                    # Build shelf_life_by_storage — use rules if available, else build from shelf_days
-                    if rules:
-                        slbs = rules.get("shelf_life_by_storage", {"fridge": rules.get("expires_in_days"), "freezer": None, "pantry": None})
+                        # Gemini didn't return a value — fall back to our rules DB
+                        rules = _rules_lookup(final_name_for_classify)
+                        if rules:
+                            shelf_days = rules["expires_in_days"]
+                            shelf_storage = rules["storage"]
+                            shelf_confidence = rules.get("confidence", "medium")
+                        else:
+                            shelf_days = 14
+                            shelf_storage = gemini_storage
+                            shelf_confidence = "low"
+
+                    # Build shelf_life_by_storage from Gemini's result fields
+                    # Gemini returns fridge/freezer/pantry directly in the result
+                    g_fridge  = result.get("fridge")
+                    g_freezer = result.get("freezer")
+                    g_pantry  = result.get("pantry")
+
+                    if any(v is not None for v in [g_fridge, g_freezer, g_pantry]):
+                        # Gemini provided all three — use them directly
+                        slbs = {
+                            "fridge":  int(g_fridge)  if g_fridge  is not None else None,
+                            "freezer": int(g_freezer) if g_freezer is not None else None,
+                            "pantry":  int(g_pantry)  if g_pantry  is not None else None,
+                        }
                     else:
-                        # Build smarter slbs based on what kind of item it is
-                        name_l = final_name_for_classify.lower()
-                        is_meat = any(w in name_l for w in ["chicken","beef","pork","turkey","fish","shrimp","salmon","steak","ground","bacon","deli","sausage","ham","lamb","veal","brisket"])
-                        is_dairy = any(w in name_l for w in ["milk","cream","yogurt","butter","cheese","kefir","half-and-half"])
-                        is_pantry_only = any(w in name_l for w in ["seltzer","litter","detergent","vodka","whiskey","rum","tequila","gin","liquor","cleaner","soap","shampoo","white claw","truly","nutrl","hard lemonade"])
-                        if shelf_storage == "fridge":
+                        # Gemini only gave expires_in_days — build slbs intelligently
+                        rules = _rules_lookup(final_name_for_classify)
+                        if rules:
+                            slbs = rules.get("shelf_life_by_storage", {"fridge": shelf_days, "freezer": None, "pantry": None})
+                        elif shelf_storage == "fridge":
                             if is_meat:
                                 slbs = {"fridge": shelf_days, "freezer": min(shelf_days * 30, 365), "pantry": None}
                             elif is_dairy:
