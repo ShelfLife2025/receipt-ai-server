@@ -3660,11 +3660,12 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
 
     expanded_names = await asyncio.gather(*[_expand_receipt_name(i.name) for i in items])
 
-    # For household items, look up UPC from Open Food Facts
+    # Look up UPC from Open Food Facts for all items (prioritize household)
     async def _resolve_upc(item: InstacartLineItem, expanded_name: str) -> Optional[str]:
         if item.upc and item.upc.strip():
             return item.upc.strip()
-        if (item.category or "").lower() != "household":
+        # Skip UPC lookup for clearly food/produce items that Instacart already matches well by name
+        if (item.category or "").lower() == "food":
             return None
         try:
             search_url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={urllib.parse.quote(expanded_name)}&search_simple=1&action=process&json=1&page_size=1"
