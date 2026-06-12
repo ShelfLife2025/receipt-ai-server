@@ -3726,43 +3726,33 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
         "pedigree dog food":                      "0023100113682",
         "purina dog food":                        "0017800129527",
         "milk bone dog treats":                   "0070330020206",
-        # Toothpaste / Oral Care
+        # Toothpaste / Oral Care — brand-specific only, generic falls back to name search
         "colgate toothpaste":                     "0035000042606",
         "crest toothpaste":                       "0037000283249",
-        "toothpaste":                             "0035000042606",
         "oral b toothbrush":                      "0300410096051",
         "listerine mouthwash":                    "0312547307013",
-        "mouthwash":                              "0312547307013",
-        # Deodorant
+        # Deodorant — brand-specific only
         "old spice deodorant":                    "0037000918608",
         "secret deodorant":                       "0037000457282",
         "dove deodorant":                         "0011111093919",
-        "deodorant":                              "0037000918608",
         "degree deodorant":                       "0011111007413",
-        # Shampoo / Body
+        # Shampoo / Body — brand-specific only
         "head and shoulders shampoo":             "0037000350729",
         "pantene shampoo":                        "0037000716365",
-        "shampoo":                                "0037000350729",
         "dove body wash":                         "0011111081046",
-        "body wash":                              "0011111081046",
         "irish spring body wash":                 "0035000594327",
-        "bar soap":                               "0011111093988",
         "dove bar soap":                          "0011111093988",
-        # Razors
+        # Razors — brand-specific only
         "gillette razor":                         "0047400258484",
         "gillette mach3 razor":                   "0047400258484",
         "venus razor":                            "0047400258507",
-        # Hand Soap / Sanitizer
+        # Hand Soap / Sanitizer — brand-specific only
         "softsoap hand soap":                     "0037000200475",
-        "hand soap":                              "0037000200475",
         "purell hand sanitizer":                  "0045865200001",
-        "hand sanitizer":                         "0045865200001",
-        # Tissue / Napkins
+        # Tissue / Napkins — brand-specific only
         "kleenex tissues":                        "0036000291452",
         "puffs tissues":                          "0037000100171",
-        "tissues":                                "0036000291452",
         "bounty napkins":                         "0030772052051",
-        "napkins":                                "0030772052051",
         # Plastic Wrap / Bags
         "ziploc bags":                            "0025700011904",
         "ziploc sandwich bags":                   "0025700011904",
