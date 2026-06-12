@@ -3685,9 +3685,12 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
     upcs = await asyncio.gather(*[_resolve_upc(items[idx], expanded_names[idx]) for idx in range(len(items))])
 
     def _build_line_item(idx: int) -> dict:
-        entry: dict = {"name": expanded_names[idx], "quantity": items[idx].quantity, "unit": items[idx].unit}
+        entry: dict = {
+            "name": expanded_names[idx],
+            "measurements": [{"quantity": items[idx].quantity, "unit": items[idx].unit}]
+        }
         if upcs[idx]:
-            entry["upc"] = upcs[idx]
+            entry["upcs"] = [upcs[idx]]
         return entry
 
     payload = {
