@@ -3660,38 +3660,167 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
 
     expanded_names = await asyncio.gather(*[_expand_receipt_name(i.name) for i in items])
 
-    # Look up UPC from Open Food Facts for all items (prioritize household)
+    # Hardcoded UPC table for common household items — no external call needed
+    _HOUSEHOLD_UPC_TABLE: Dict[str, str] = {
+        # Paper Towels
+        "bounty paper towels":                    "0030772056301",
+        "bounty select-a-size paper towels":      "0030772058749",
+        "bounty essentials paper towels":         "0030772058039",
+        "paper towels":                           "0030772056301",
+        "viva paper towels":                      "0054000000877",
+        "brawny paper towels":                    "0057000001376",
+        # Toilet Paper
+        "charmin ultra soft toilet paper":        "0030772012282",
+        "charmin ultra strong toilet paper":      "0030772012299",
+        "charmin toilet paper":                   "0030772012282",
+        "toilet paper":                           "0030772012282",
+        "cottonelle toilet paper":                "0035000517012",
+        "scott toilet paper":                     "0054000000860",
+        "angel soft toilet paper":                "0057000001383",
+        # Laundry
+        "tide original laundry detergent":        "0037000259831",
+        "tide pods laundry detergent":            "0037000780175",
+        "tide laundry detergent":                 "0037000259831",
+        "laundry detergent":                      "0037000259831",
+        "gain original laundry detergent":        "0037000811473",
+        "gain laundry detergent":                 "0037000811473",
+        "arm and hammer laundry detergent":       "0033200020967",
+        "persil laundry detergent":               "0046500014002",
+        "all laundry detergent":                  "0072613440009",
+        "dreft laundry detergent":                "0037000869504",
+        "downy fabric softener":                  "0037000888192",
+        "bounce dryer sheets":                    "0037000315902",
+        "dryer sheets":                           "0037000315902",
+        # Dish
+        "dawn dish soap":                         "0037000951919",
+        "dawn original dish soap":                "0037000951919",
+        "dish soap":                              "0037000951919",
+        "cascade dish pods":                      "0037000951230",
+        "cascade platinum pods":                  "0037000914358",
+        "cascade dishwasher detergent":           "0037000951230",
+        "finish dishwasher pods":                 "0051700897706",
+        # Cleaning
+        "lysol disinfectant spray":               "0019200804602",
+        "lysol wipes":                            "0019200804619",
+        "clorox disinfecting wipes":              "0044600322354",
+        "clorox bleach":                          "0044600301442",
+        "mr clean multi surface cleaner":         "0037000901099",
+        "windex glass cleaner":                   "0046500013319",
+        "febreze air freshener":                  "0037000900849",
+        "air freshener":                          "0037000900849",
+        "swiffer sweeper refills":                "0037000807612",
+        "swiffer wet jet pads":                   "0037000807841",
+        # Trash Bags
+        "glad trash bags":                        "0012587813552",
+        "glad forceflex trash bags":              "0012587827740",
+        "hefty ultra strong trash bags":          "0018600016511",
+        "hefty trash bags":                       "0018600016511",
+        "trash bags":                             "0012587813552",
+        # Cat Litter
+        "fresh step cat litter":                  "0044600313697",
+        "fresh step extreme odor control cat litter": "0044600313697",
+        "tidy cats cat litter":                   "0070230111013",
+        "arm and hammer cat litter":              "0033200014591",
+        "cat litter":                             "0044600313697",
+        # Dog
+        "pedigree dog food":                      "0023100113682",
+        "purina dog food":                        "0017800129527",
+        "milk bone dog treats":                   "0070330020206",
+        # Toothpaste / Oral Care
+        "colgate toothpaste":                     "0035000042606",
+        "crest toothpaste":                       "0037000283249",
+        "toothpaste":                             "0035000042606",
+        "oral b toothbrush":                      "0300410096051",
+        "listerine mouthwash":                    "0312547307013",
+        "mouthwash":                              "0312547307013",
+        # Deodorant
+        "old spice deodorant":                    "0037000918608",
+        "secret deodorant":                       "0037000457282",
+        "dove deodorant":                         "0011111093919",
+        "deodorant":                              "0037000918608",
+        "degree deodorant":                       "0011111007413",
+        # Shampoo / Body
+        "head and shoulders shampoo":             "0037000350729",
+        "pantene shampoo":                        "0037000716365",
+        "shampoo":                                "0037000350729",
+        "dove body wash":                         "0011111081046",
+        "body wash":                              "0011111081046",
+        "irish spring body wash":                 "0035000594327",
+        "bar soap":                               "0011111093988",
+        "dove bar soap":                          "0011111093988",
+        # Razors
+        "gillette razor":                         "0047400258484",
+        "gillette mach3 razor":                   "0047400258484",
+        "venus razor":                            "0047400258507",
+        # Hand Soap / Sanitizer
+        "softsoap hand soap":                     "0037000200475",
+        "hand soap":                              "0037000200475",
+        "purell hand sanitizer":                  "0045865200001",
+        "hand sanitizer":                         "0045865200001",
+        # Tissue / Napkins
+        "kleenex tissues":                        "0036000291452",
+        "puffs tissues":                          "0037000100171",
+        "tissues":                                "0036000291452",
+        "bounty napkins":                         "0030772052051",
+        "napkins":                                "0030772052051",
+        # Plastic Wrap / Bags
+        "ziploc bags":                            "0025700011904",
+        "ziploc sandwich bags":                   "0025700011904",
+        "glad ziploc bags":                       "0025700011904",
+        "plastic wrap":                           "0025700011805",
+        "saran wrap":                             "0025700011805",
+        "aluminum foil":                          "0025700061276",
+        "reynolds wrap aluminum foil":            "0025700061276",
+        # Batteries
+        "duracell batteries":                     "0041333038261",
+        "energizer batteries":                    "0039800020321",
+        "batteries":                              "0041333038261",
+        # Light Bulbs
+        "ge light bulbs":                         "0043168606851",
+        "light bulbs":                            "0043168606851",
+    }
+
+    def _lookup_household_upc(name: str) -> Optional[str]:
+        """Look up UPC from hardcoded table using fuzzy name matching."""
+        name_lower = name.lower().strip()
+        # Exact match first
+        if name_lower in _HOUSEHOLD_UPC_TABLE:
+            return _HOUSEHOLD_UPC_TABLE[name_lower]
+        # Partial match — check if any key is contained in the name or vice versa
+        # Sort by length descending so more specific keys win
+        for key in sorted(_HOUSEHOLD_UPC_TABLE.keys(), key=len, reverse=True):
+            if key in name_lower or name_lower in key:
+                return _HOUSEHOLD_UPC_TABLE[key]
+        return None
+
+    # Resolve UPC for each item
     async def _resolve_upc(item: InstacartLineItem, expanded_name: str) -> Optional[str]:
+        # If UPC was sent directly from the app, use it
         if item.upc and item.upc.strip():
             return item.upc.strip()
-        # Skip UPC lookup for clearly food/produce items that Instacart already matches well by name
+        # Skip for food items — Instacart already matches those well by name
         if (item.category or "").lower() == "food":
             return None
-        try:
-            search_url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={urllib.parse.quote(expanded_name)}&search_simple=1&action=process&json=1&page_size=1"
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-                r = await client.get(search_url, headers={"User-Agent": "ShelfLife/1.0"})
-            if r.status_code == 200:
-                data = r.json()
-                products = data.get("products", [])
-                if products:
-                    code = products[0].get("code", "").strip()
-                    if code:
-                        print(f"[INSTACART UPC] '{expanded_name}' -> {code}", flush=True)
-                        return code
-        except Exception as e:
-            print(f"[INSTACART UPC] lookup failed for '{expanded_name}': {e}", flush=True)
-        return None
+        # Look up from hardcoded table
+        upc = _lookup_household_upc(expanded_name)
+        if upc:
+            print(f"[INSTACART UPC] '{expanded_name}' -> {upc} (hardcoded table)", flush=True)
+        else:
+            print(f"[INSTACART UPC] '{expanded_name}' -> no match in table", flush=True)
+        return upc
 
     upcs = await asyncio.gather(*[_resolve_upc(items[idx], expanded_names[idx]) for idx in range(len(items))])
 
     def _build_line_item(idx: int) -> dict:
         entry: dict = {
             "name": expanded_names[idx],
-            "measurements": [{"quantity": items[idx].quantity, "unit": items[idx].unit}]
+            "quantity": items[idx].quantity,
+            "unit": items[idx].unit,
+            "line_item_measurements": [{"quantity": items[idx].quantity, "unit": items[idx].unit}]
         }
         if upcs[idx]:
             entry["upcs"] = [upcs[idx]]
+        print(f"[INSTACART LINE ITEM] {entry}", flush=True)
         return entry
 
     payload = {
@@ -3699,6 +3828,7 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
         "link_type": "shopping_list",
         "line_items": [_build_line_item(idx) for idx in range(len(items))],
     }
+    print(f"[INSTACART PAYLOAD] {payload}", flush=True)
 
     url = INSTACART_PRODUCTS_LINK_URL
     headers = {
