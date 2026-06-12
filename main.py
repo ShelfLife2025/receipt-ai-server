@@ -1621,6 +1621,8 @@ class InstacartLineItem(BaseModel):
     name: str
     quantity: float = 1.0
     unit: str = "each"
+    upc: Optional[str] = None
+    category: Optional[str] = None
 
 
 class InstacartCreateListRequest(BaseModel):
@@ -3658,10 +3660,40 @@ async def instacart_create_list(req: InstacartCreateListRequest) -> Dict[str, st
 
     expanded_names = await asyncio.gather(*[_expand_receipt_name(i.name) for i in items])
 
+    # For household items, look up UPC from Open Food Facts
+    async def _resolve_upc(item: InstacartLineItem, expanded_name: str) -> Optional[str]:
+        if item.upc and item.upc.strip():
+            return item.upc.strip()
+        if (item.category or "").lower() != "household":
+            return None
+        try:
+            search_url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={urllib.parse.quote(expanded_name)}&search_simple=1&action=process&json=1&page_size=1"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                r = await client.get(search_url, headers={"User-Agent": "ShelfLife/1.0"})
+            if r.status_code == 200:
+                data = r.json()
+                products = data.get("products", [])
+                if products:
+                    code = products[0].get("code", "").strip()
+                    if code:
+                        print(f"[INSTACART UPC] '{expanded_name}' -> {code}", flush=True)
+                        return code
+        except Exception as e:
+            print(f"[INSTACART UPC] lookup failed for '{expanded_name}': {e}", flush=True)
+        return None
+
+    upcs = await asyncio.gather(*[_resolve_upc(items[idx], expanded_names[idx]) for idx in range(len(items))])
+
+    def _build_line_item(idx: int) -> dict:
+        entry: dict = {"name": expanded_names[idx], "quantity": items[idx].quantity, "unit": items[idx].unit}
+        if upcs[idx]:
+            entry["upc"] = upcs[idx]
+        return entry
+
     payload = {
         "title": req.title,
         "link_type": "shopping_list",
-        "line_items": [{"name": expanded_names[idx], "quantity": i.quantity, "unit": i.unit} for idx, i in enumerate(items)],
+        "line_items": [_build_line_item(idx) for idx in range(len(items))],
     }
 
     url = INSTACART_PRODUCTS_LINK_URL
