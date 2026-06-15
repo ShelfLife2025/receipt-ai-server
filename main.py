@@ -4370,15 +4370,15 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
         ]
         is_packaged = any(sig in name_lower for sig in packaged_signals)
 
-        if is_household:
-            suffix = "product isolated white background clean"
-            fallback_query = "household cleaning product white background"
+                if is_household:
+            suffix = "retail product packaging grocery store clean white background"
+            fallback_query = "household product retail packaging white background"
         elif is_packaged:
-            suffix = "product isolated white background"
-            fallback_query = "packaged food product isolated white background"
+            suffix = "grocery store product packaging isolated white background"
+            fallback_query = "packaged grocery product isolated white background"
         else:
-            suffix = "fresh isolated white background"
-            fallback_query = "fresh food close up isolated"
+            suffix = "fresh grocery store product isolated white background"
+            fallback_query = "fresh grocery food product isolated white background"
 
         # ── Inner search helper ─────────────────────────────────────────────────
         async def _search(query: str, append_suffix: bool = True, require_food_check: bool = True) -> Optional[str]:
