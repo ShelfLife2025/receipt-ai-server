@@ -4382,7 +4382,7 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
         ]
         is_packaged = any(sig in name_lower for sig in packaged_signals)
 
-                if is_household:
+        if is_household:
             suffix = "retail product packaging grocery store clean white background"
             fallback_query = "household product retail packaging white background"
         elif is_packaged:
