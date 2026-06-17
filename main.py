@@ -5268,6 +5268,68 @@ Only return the JSON object. No markdown, no explanation, no code blocks."""
 
     return fallback
 
+# =========================
+# /parse-barcode
+# Accepts a product name from a UPC lookup and runs it through
+# the same Gemini AI enrichment + image fetch as a receipt scan.
+# Returns a single-item array in the same ParsedItem format.
+# =========================
+
+class BarcodeRequest(BaseModel):
+    product_name: str
+
+
+@app.post("/parse-barcode")
+@app.post("/parse-barcode/")
+async def parse_barcode(req: BarcodeRequest, request: Request):
+    product_name = req.product_name.strip()
+    if not product_name:
+        raise HTTPException(status_code=422, detail="product_name is required")
+
+    print(f"[BARCODE] Looking up: {product_name!r}", flush=True)
+
+    # Step 1: Use Gemini to get shelf life + category — identical prompt to receipt flow
+    item_dict = {"name": product_name, "category": "Food"}
+    enriched_list = await enrich_items_with_ai([item_dict])
+    enriched = enriched_list[0] if enriched_list else {}
+
+    full_name    = (enriched.get("full_name") or product_name).strip()
+    category     = (enriched.get("category") or "Food").strip()
+    expires_days = enriched.get("expires_in_days")
+    storage      = enriched.get("storage") or "pantry"
+    fridge_days  = enriched.get("fridge")
+    freezer_days = enriched.get("freezer")
+    pantry_days  = enriched.get("pantry")
+
+    # Build shelf_life_by_storage exactly like the receipt flow
+    shelf_life: Dict[str, int] = {}
+    if isinstance(fridge_days, int):  shelf_life["fridge"]  = fridge_days
+    if isinstance(freezer_days, int): shelf_life["freezer"] = freezer_days
+    if isinstance(pantry_days, int):  shelf_life["pantry"]  = pantry_days
+
+    # Step 2: Fetch product image — same pipeline as receipt: Unsplash → Freepik
+    base_url = _public_base_url(request)
+    image_url = _image_url_for_item(base_url, full_name, category)
+
+    # Step 3: Build response in the same ParsedItem format the iOS app expects
+    result = {
+        "name":                  full_name,
+        "original_name":         product_name,
+        "quantity":              1,
+        "category":              category,
+        "expires_in_days":       expires_days,
+        "storage":               storage,
+        "shelf_life_by_storage": shelf_life if shelf_life else None,
+        "image_url":             image_url,
+    }
+
+    print(f"[BARCODE] Result: {full_name!r} cat={category} expires={expires_days}d storage={storage}", flush=True)
+
+    # Return as a single-item array so the iOS app handles it
+    # identically to a receipt response
+    return [result]
+
+
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
     try:
