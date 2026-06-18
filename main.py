@@ -63,6 +63,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+SPOONACULAR_API = (os.getenv("SPOONACULAR_API") or "").strip()
+
 VISION_TMP_PATH = "/tmp/gcloud_key.json"
 # ── Multi-storage shelf life table (USDA / FDA / StillTasty sourced) ──────────
 # Each entry has fridge, freezer, and pantry days.
@@ -4330,6 +4332,48 @@ def _is_food_photo(photo: dict) -> bool:
     return False
 
 
+async def _spoonacular_image(name: str) -> Optional[str]:
+    """
+    Fetch a clean, generic, non-branded ingredient image from Spoonacular.
+    Always strips brand names before searching so "Doritos" -> "chips",
+    "Jif Peanut Butter" -> "peanut butter", etc.
+    Returns the image URL string or None.
+    """
+    if not SPOONACULAR_API:
+        return None
+    try:
+        # Strip brand so we always search the generic ingredient name
+        simplified = _simplify_for_unsplash(name)
+        if not simplified or len(simplified) < 2:
+            simplified = name.strip()
+
+        search_url = "https://api.spoonacular.com/food/ingredients/search"
+        params = {
+            "query": simplified,
+            "number": 1,
+            "apiKey": SPOONACULAR_API,
+        }
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+            resp = await client.get(search_url, params=params)
+            if resp.status_code != 200:
+                print(f"[SPOONACULAR] HTTP {resp.status_code} for '{simplified}'", flush=True)
+                return None
+            data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                print(f"[SPOONACULAR] no results for '{simplified}'", flush=True)
+                return None
+            image_name = results[0].get("image", "")
+            if not image_name:
+                return None
+            img_url = f"https://spoonacular.com/cdn/ingredients_250x250/{image_name}"
+            print(f"[SPOONACULAR] ✅ '{name}' -> '{simplified}' -> {img_url}", flush=True)
+            return img_url
+    except Exception as e:
+        print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+    return None
+
+
 async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str]:
     """
     Search Unsplash for a product photo.
@@ -4891,7 +4935,14 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     # Turns "Ck Sl Cookie" -> "Chocolate Slice Cookie" before searching
     name = await _expand_receipt_name(name)
 
-    # ── STEP 1: Kroger API (primary — real product photos) ────────────────────
+    # ── STEP 1: Spoonacular (generic, non-branded ingredient images) ────────────
+    if not img_url and not is_household:
+        try:
+            img_url = await _spoonacular_image(name)
+        except Exception as e:
+            print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+
+    # ── STEP 2: Kroger API (branded product photos — fallback for misses) ───────
     if not img_url:
         try:
             img_url = await _kroger_image(name)
@@ -4910,7 +4961,7 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 2: Edamam Food Database (real food photos, accurate matches) ─────
+    # ── STEP 3: Edamam Food Database (fallback for further misses) ─────────────
     if not img_url and not is_household:
         try:
             img_url = await _edamam_food_image(name)
