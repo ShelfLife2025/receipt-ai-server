@@ -5380,7 +5380,108 @@ async def parse_barcode(req: BarcodeRequest, request: Request):
     # identically to a receipt response
     return [result]
 
+# =========================
+# /parse-label
+# Accepts a pill bottle label image, runs OCR, then uses Gemini
+# to organize the raw text into readable sections.
+# Gemini does NOT generate any information — it only formats
+# what the OCR actually read from the label.
+# =========================
 
+class LabelSection(BaseModel):
+    title: str
+    content: str
+
+class LabelParseResponse(BaseModel):
+    product_name: str
+    sections: list[LabelSection]
+    raw_ocr: str
+    disclaimer: str
+
+@app.post("/parse-label")
+@app.post("/parse-label/")
+async def parse_label(file: UploadFile = File(...)):
+    # ── Step 1: Read image bytes ──────────────────────────────────────────────
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="Empty image file.")
+
+    print(f"[LABEL] Received image: {file.filename} ({len(image_bytes)} bytes)", flush=True)
+
+    # ── Step 2: OCR via Google Cloud Vision ───────────────────────────────────
+    try:
+        vision_client = vision.ImageAnnotatorClient()
+        vision_image = vision.Image(content=image_bytes)
+        ocr_response = vision_client.text_detection(image=vision_image)
+        texts = ocr_response.text_annotations
+        if not texts:
+            raise HTTPException(status_code=422, detail="No text found on label. Try better lighting or a closer photo.")
+        raw_ocr = texts[0].description.strip()
+        print(f"[LABEL] OCR extracted {len(raw_ocr)} chars", flush=True)
+    except Exception as exc:
+        print(f"[LABEL] OCR failed: {exc}", flush=True)
+        raise HTTPException(status_code=500, detail=f"OCR failed: {exc}")
+
+    # ── Step 3: Gemini formats the OCR text — no generation, only organization ─
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="Gemini API key not configured.")
+
+    prompt = f"""You are a label formatter. Your ONLY job is to take the raw OCR text from a pill or medicine bottle label and organize it into structured sections.
+
+CRITICAL RULES:
+- Do NOT add any information that is not in the OCR text below.
+- Do NOT rephrase, summarize, or paraphrase. Copy the exact words from the label.
+- Do NOT give medical advice or add warnings not present on the label.
+- If a section is not present in the OCR text, omit it entirely.
+- Only use information from the OCR text provided.
+
+RAW OCR TEXT FROM LABEL:
+\"\"\"
+{raw_ocr}
+\"\"\"
+
+Organize the above text into this JSON format. Only include sections that exist in the OCR text:
+{{
+  "product_name": "the product name from the label, or empty string if not found",
+  "sections": [
+    {{"title": "Active Ingredients", "content": "exact text from label"}},
+    {{"title": "Directions", "content": "exact text from label"}},
+    {{"title": "Warnings", "content": "exact text from label"}},
+    {{"title": "Do Not Use", "content": "exact text from label"}},
+    {{"title": "Ask a Doctor", "content": "exact text from label"}},
+    {{"title": "Inactive Ingredients", "content": "exact text from label"}},
+    {{"title": "Uses", "content": "exact text from label"}},
+    {{"title": "Storage", "content": "exact text from label"}}
+  ]
+}}
+
+Return ONLY valid JSON. No markdown, no explanation, no extra text."""
+
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        gemini_response = model.generate_content(prompt)
+        raw_json = gemini_response.text.strip()
+
+        # Strip markdown code fences if present
+        if raw_json.startswith("```"):
+            raw_json = re.sub(r"^```[a-z]*\n?", "", raw_json)
+            raw_json = re.sub(r"\n?```$", "", raw_json)
+            raw_json = raw_json.strip()
+
+        parsed = json.loads(raw_json)
+        print(f"[LABEL] Gemini organized into {len(parsed.get('sections', []))} sections", flush=True)
+
+    except Exception as exc:
+        print(f"[LABEL] Gemini formatting failed: {exc}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Label formatting failed: {exc}")
+
+    return {
+        "product_name": parsed.get("product_name", ""),
+        "sections": parsed.get("sections", []),
+        "raw_ocr": raw_ocr,
+        "disclaimer": "Information shown is read directly from the product label. This is not medical advice."
+    }
+    
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
     try:
