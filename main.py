@@ -5382,10 +5382,11 @@ async def parse_barcode(req: BarcodeRequest, request: Request):
 
 # =========================
 # /parse-label
-# Accepts a pill bottle label image, runs OCR, then uses Gemini
-# to organize the raw text into readable sections.
-# Gemini does NOT generate any information — it only formats
-# what the OCR actually read from the label.
+# Accepts a pill bottle label image. OCR reads whatever text is
+# visible on the bottle front, then Gemini identifies the exact
+# product and looks up the FULL known drug label information for
+# that specific product — directions, warnings, interactions, etc.
+# OCR identifies the product. Gemini supplies the complete info.
 # =========================
 
 class LabelSection(BaseModel):
@@ -5408,7 +5409,7 @@ async def parse_label(file: UploadFile = File(...)):
 
     print(f"[LABEL] Received image: {file.filename} ({len(image_bytes)} bytes)", flush=True)
 
-    # ── Step 2: OCR via Google Cloud Vision ───────────────────────────────────
+    # ── Step 2: OCR via Google Cloud Vision to identify the product ───────────
     try:
         vision_client = vision.ImageAnnotatorClient()
         vision_image = vision.Image(content=image_bytes)
@@ -5417,45 +5418,47 @@ async def parse_label(file: UploadFile = File(...)):
         if not texts:
             raise HTTPException(status_code=422, detail="No text found on label. Try better lighting or a closer photo.")
         raw_ocr = texts[0].description.strip()
-        print(f"[LABEL] OCR extracted {len(raw_ocr)} chars", flush=True)
+        print(f"[LABEL] OCR extracted {len(raw_ocr)} chars: {raw_ocr[:200]!r}", flush=True)
     except Exception as exc:
         print(f"[LABEL] OCR failed: {exc}", flush=True)
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}")
 
-    # ── Step 3: Gemini formats the OCR text — no generation, only organization ─
+    # ── Step 3: Gemini identifies the product and looks up full label info ────
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="Gemini API key not configured.")
 
-    prompt = f"""You are a label formatter. Your ONLY job is to take the raw OCR text from a pill or medicine bottle label and organize it into structured sections.
+    prompt = f"""You are a medication label assistant. A user has scanned the front of a pill bottle.
 
-CRITICAL RULES:
-- Do NOT add any information that is not in the OCR text below.
-- Do NOT rephrase, summarize, or paraphrase. Copy the exact words from the label.
-- Do NOT give medical advice or add warnings not present on the label.
-- If a section is not present in the OCR text, omit it entirely.
-- Only use information from the OCR text provided.
-
-RAW OCR TEXT FROM LABEL:
+The OCR text read from the bottle is:
 \"\"\"
 {raw_ocr}
 \"\"\"
 
-Organize the above text into this JSON format. Only include sections that exist in the OCR text:
+Your job:
+1. Identify the exact product name and brand from the OCR text (e.g. "Excedrin Migraine Relief", "Tylenol Extra Strength", "Advil Ibuprofen 200mg").
+2. Using your knowledge of that specific FDA-approved product, return the COMPLETE official label information for it — including all sections that appear on the full drug label, even if they were not visible on the front of the bottle due to peel labels or limited visible text.
+3. Only return factual, publicly known drug label information for this exact product. Do not invent anything.
+4. If you cannot confidently identify the product from the OCR text, return an empty sections array.
+
+Return this JSON format:
 {{
-  "product_name": "the product name from the label, or empty string if not found",
+  "product_name": "Full product name and brand",
   "sections": [
-    {{"title": "Active Ingredients", "content": "exact text from label"}},
-    {{"title": "Directions", "content": "exact text from label"}},
-    {{"title": "Warnings", "content": "exact text from label"}},
-    {{"title": "Do Not Use", "content": "exact text from label"}},
-    {{"title": "Ask a Doctor", "content": "exact text from label"}},
-    {{"title": "Inactive Ingredients", "content": "exact text from label"}},
-    {{"title": "Uses", "content": "exact text from label"}},
-    {{"title": "Storage", "content": "exact text from label"}}
+    {{"title": "Active Ingredients", "content": "full content"}},
+    {{"title": "Uses", "content": "full content"}},
+    {{"title": "Directions", "content": "full content"}},
+    {{"title": "Warnings", "content": "full content"}},
+    {{"title": "Do Not Use", "content": "full content"}},
+    {{"title": "Ask a Doctor", "content": "full content"}},
+    {{"title": "Ask a Doctor or Pharmacist", "content": "full content"}},
+    {{"title": "Stop Use and Ask a Doctor", "content": "full content"}},
+    {{"title": "Inactive Ingredients", "content": "full content"}},
+    {{"title": "Storage", "content": "full content"}},
+    {{"title": "Other Information", "content": "full content"}}
   ]
 }}
 
-Return ONLY valid JSON. No markdown, no explanation, no extra text."""
+Only include sections that exist for this product. Return ONLY valid JSON. No markdown, no explanation, no extra text."""
 
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
@@ -5469,17 +5472,21 @@ Return ONLY valid JSON. No markdown, no explanation, no extra text."""
             raw_json = raw_json.strip()
 
         parsed = json.loads(raw_json)
-        print(f"[LABEL] Gemini organized into {len(parsed.get('sections', []))} sections", flush=True)
+        print(f"[LABEL] Gemini returned {len(parsed.get('sections', []))} sections for: {parsed.get('product_name', '')!r}", flush=True)
 
     except Exception as exc:
-        print(f"[LABEL] Gemini formatting failed: {exc}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Label formatting failed: {exc}")
+        print(f"[LABEL] Gemini lookup failed: {exc}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Label lookup failed: {exc}")
+
+    sections = parsed.get("sections", [])
+    if not sections:
+        raise HTTPException(status_code=422, detail="Could not identify product from label. Try a clearer photo of the product name.")
 
     return {
         "product_name": parsed.get("product_name", ""),
-        "sections": parsed.get("sections", []),
+        "sections": sections,
         "raw_ocr": raw_ocr,
-        "disclaimer": "Information shown is read directly from the product label. This is not medical advice."
+        "disclaimer": "Information is sourced from the FDA-approved label for this product. This is not medical advice."
     }
     
 @app.middleware("http")
