@@ -336,7 +336,10 @@ SHELF_LIFE_DB: Dict[str, Dict] = {
     "bread crumbs":         {"fridge": None, "freezer": 365,  "pantry": 180,  "default_storage": "pantry",  "category": "Food"},
     "cornmeal":             {"fridge": None, "freezer": 365,  "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
     "baking powder":        {"fridge": None, "freezer": None, "pantry": 365,  "default_storage": "pantry",  "category": "Food"},
-    "baking soda":          {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
+    "baking soda":                    {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
+    "arm and hammer baking soda":     {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
+    "arm & hammer baking soda":       {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
+    "arm hammer baking soda":         {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
     "sugar":                {"fridge": None, "freezer": None, "pantry": 3650, "default_storage": "pantry",  "category": "Food"},
     "brown sugar":          {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
     "powdered sugar":       {"fridge": None, "freezer": None, "pantry": 730,  "default_storage": "pantry",  "category": "Food"},
@@ -1435,7 +1438,34 @@ STORE_HEADER_PATTERNS: Dict[str, re.Pattern] = {
 
 _STORE_TOKENS = {"publix", "walmart", "wal", "mart", "target", "costco", "kroger", "aldi", "whole", "foods", "trader", "joe", "joes", "wm", "fresh", "market"}
 _GENERIC_HEADER_TOKENS = {"super", "markets", "market", "stores", "store", "wholesale", "pharmacy", "supercenter"}
-_JUNK_EXACT_LINES = {"t", "f", "tf", "t f", "ft", "tt", "ff", "grocery", "groceries", "visa", "debit", "credit", "for"}
+_JUNK_EXACT_LINES = {
+    # Single/double letter noise
+    "t", "f", "tf", "t f", "ft", "tt", "ff",
+    # Payment/financial
+    "visa", "debit", "credit", "for", "cash", "tender",
+    # Generic category labels that are NOT food items
+    "grocery", "groceries", "produce", "deli", "bakery", "seafood",
+    "meat", "dairy", "frozen", "pharmacy", "floral", "bulk",
+    "general merchandise", "gm", "nonfood", "non food", "non-food",
+    # Costco-specific section headers
+    "bottom of basket", "top of basket",
+    "instant savings", "coupon savings",
+    "executive member", "executive membership",
+    "executive rebate",
+    "next renewal", "membership renewal",
+    "warehouse", "costco wholesale",
+    # Generic receipt labels
+    "food product", "live food product", "food item",
+    "sugar free food product", "live sugar free food product",
+    "tote", "reusable bag", "bag charge", "bag fee",
+    "wpv tote", "wpv",
+    # ALDI section labels
+    "special buy", "aldi finds", "weekly specials",
+    # Kroger/Publix
+    "digital coupon", "fuel points", "gas points",
+    # Whole Foods / Trader Joe's
+    "team member",
+}
 
 STOP_ITEM_WORDS = {"lb", "lbs", "oz", "g", "kg", "ct", "ea", "each", "w", "wt", "weight", "at", "x", "vov"}
 
@@ -1572,6 +1602,57 @@ NOISE_PATTERNS = [
     r"\boak\s*grove\s*shoppes?\b",
     r"\boak\s*grove\b",
     r"\bshoppes?\b",
+    # ── Costco section headers & meta lines ─────────────────────────────────
+    r"\bbottom\s+of\s+basket\b",
+    r"\btop\s+of\s+basket\b",
+    r"\binstant\s+savings\b",
+    r"\bcoupon\s+savings\b",
+    r"\bexecutive\s+(?:member|membership|rebate)\b",
+    r"\bnext\s+renewal\b",
+    r"\bmembership\s+renewal\b",
+    r"^\s*costco\s+wholesale\s*$",
+    r"^\s*warehouse\s*$",
+    r"\bcash\s*rebate\b",
+    r"\bannual\s+member\b",
+    r"\bbob\s+count\b",
+    # ── Bag / tote charges (all stores) ──────────────────────────────────
+    r"\breusable\s+bag\b",
+    r"\bbag\s+(?:charge|fee)\b",
+    r"\bcarry\s+out\s+bag\b",
+    r"\bplastic\s+bag\b",
+    r"\bwpv\s*tote\b",
+    r"^\s*tote\s*$",
+    r"^\s*wpv\s*$",
+    # ── Generic category header labels (all stores) ──────────────────────
+    r"^\s*produce\s*$",
+    r"^\s*deli\s*$",
+    r"^\s*bakery\s*$",
+    r"^\s*seafood\s*$",
+    r"^\s*(?:raw\s+)?meat\s*$",
+    r"^\s*dairy\s*$",
+    r"^\s*frozen\s*$",
+    r"^\s*floral\s*$",
+    r"^\s*bulk\s*$",
+    r"^\s*(?:general\s+)?merchandise\s*$",
+    r"^\s*non[-\s]?food\s*$",
+    r"\bfood\s+product\b",
+    r"\blive\s+(?:sugar\s+free\s+)?food\s+product\b",
+    # ── Loyalty / rewards lines (all stores) ────────────────────────────
+    r"\bdigital\s+coupon\b",
+    r"\bfuel\s+points\b",
+    r"\bgas\s+points\b",
+    r"\bcash\s+rewards?\b",
+    r"\breward\s+points\b",
+    r"\bjust\s+for\s+u\b",
+    r"\bclub\s+card\b",
+    r"\bplus\s+card\b",
+    r"\baldi\s+finds\b",
+    r"\bspecial\s+buy\b",
+    r"\bweekly\s+specials?\b",
+    # ── OCR garbage patterns (universal) ──────────────────────────────
+    r"^\s*[A-Za-z]{1,3}\s*$",
+    r"^\s*[A-Za-z]{3,8}\s+\d{2,4}[A-Za-z]{1,4}\s*$",
+    r"^\s*[BCDFGHJKLMNPQRSTVWXYZbcdfghjklmnpqrstvwxyz]{4,}\s*$",
 ]
 NOISE_RE = re.compile("|".join(f"(?:{p})" for p in NOISE_PATTERNS), re.IGNORECASE)
 
@@ -3059,8 +3140,30 @@ def _is_junk_line(s: str) -> bool:
     if key in _JUNK_EXACT_LINES:
         return True
     toks = key.split()
-    if len(toks) == 1 and toks[0].isalpha() and len(toks[0]) <= 2:
-        return True
+
+    # Single word: too short or all consonants = noise
+    if len(toks) == 1:
+        word = toks[0]
+        if word.isalpha() and len(word) <= 4:
+            return True
+        if word.isalpha() and len(word) >= 4 and not any(c in "aeiouAEIOU" for c in word):
+            return True
+
+    # Two words: both tiny with no vowels = OCR garbage
+    if len(toks) == 2:
+        both_short = all(len(t) <= 3 for t in toks)
+        no_vowels  = all(not any(c in "aeiouAEIOU" for c in t) for t in toks if t.isalpha())
+        if both_short and no_vowels:
+            return True
+        # Random letters + malformed number e.g. "Ahoxi 200lds"
+        if toks[0].isalpha() and re.match(r"^\d{2,4}[A-Za-z]{1,4}$", toks[1]):
+            return True
+
+    # All tokens are 1-2 letters and none are known units = noise
+    if len(toks) >= 2 and all(len(t) <= 2 and t.isalpha() for t in toks):
+        if not any(t in {"oz", "lb", "ct", "ea", "gf", "og"} for t in toks):
+            return True
+
     return False
 
 
@@ -5602,7 +5705,11 @@ _UNSPLASH_QUERY_OVERRIDES: dict = {
     "agave":                   "agave nectar bottle white background",
     "molasses":                "molasses bottle jar white background",
     "vanilla extract":         "vanilla extract bottle white background",
-    "baking soda":             "baking soda box orange white background",
+    "baking soda":                  "baking soda box orange white background",
+    "arm and hammer baking soda":   "arm hammer baking soda orange box white background",
+    "arm & hammer baking soda":     "arm hammer baking soda orange box white background",
+    "arm hammer baking soda":       "arm hammer baking soda orange box white background",
+    "arm hammer":                   "arm hammer baking soda orange box white background",
     "baking powder":           "baking powder can container white background",
     "yeast":                   "active dry yeast packet jar white background",
     "cornstarch":              "cornstarch box package white background",
