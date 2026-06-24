@@ -585,146 +585,490 @@ async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
             [{"name": it["name"], "category": it["category"]} for it in uncached_items],
             indent=2
         )
-        prompt = f"""You are an expert food scientist and grocery store assistant. For each item below, return a JSON array in the same order as the input.
+        prompt = f"""You are the world's leading expert in food science, grocery retail, and USDA/FDA food safety guidelines. Your job is to analyze grocery items and return precise shelf life data. You have encyclopedic knowledge of every food product, brand, and prepared item sold in American grocery stores.
 
-For each item return these 6 fields:
-- full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand all abbreviations including brand abbreviations. Example: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon", "SBR BUFF WG MARIND" -> "Sweet Baby Ray's Buffalo Wing Marinade", "KH PRETZEL BUNS" -> "King's Hawaiian Pretzel Buns", "PBX PARMESAN WEDGE" -> "Publix Parmesan Wedge", "FRSH STP XTRM ODOR" -> "Fresh Step Extreme Odor Control Cat Litter", "KH SAVORY DIN ROLL" -> "King's Hawaiian Savory Dinner Rolls", "PUB MILK RF GRN PT 2%" -> "Publix 2% Milk Green Cap", "PUB MLK GRN 2%" -> "Publix 2% Milk Green Cap". If the name is already clean, return it as-is. CRITICAL: Each input row is exactly ONE product — do NOT merge multiple products into one name. Do NOT combine a dairy item with a paper goods item. "rf" on a Publix milk line means "recycled/returnable jug" not "recycled fiber". "grn" on a milk line means "green cap" (2% fat), not a paper product color. "pt" means "pint" or "half-gallon". Never produce a name that mixes food and non-food words (e.g. "Publix Milk Recycled Fiber Green Paper Towels" is wrong — those are two separate items).
-- expires_in_days: integer days from purchase until expiration using the default storage method below
-- storage: the recommended storage location — one of "fridge", "freezer", or "pantry"
-- fridge: integer days the item lasts in the fridge, or null if fridge storage is not safe/applicable
-- freezer: integer days the item lasts in the freezer, or null if freezer storage is not safe/applicable
-- pantry: integer days the item lasts in the pantry, or null if pantry storage is not safe/applicable
-- category: either "Food" or "Household"
-  CRITICAL — classify every single item. Think carefully. Use these exact rules:
-  HOUSEHOLD (not edible, not drinkable — used for cleaning, personal care, paper products, or pets):
-    Paper products: Bounty, Charmin, Scott, Kleenex, paper towels, toilet paper, napkins, tissues
-    Cleaning: Tide, Gain, Downy, Bounce, Lysol, Febreze, Dawn, Cascade, Windex, Clorox, Swiffer, Fabuloso, Mr. Clean, bleach, dish soap, laundry detergent, dryer sheets, fabric softener, sponges, scrub brushes
-    Personal care: Cremo, Old Spice, Dove, Pantene, Head & Shoulders, shampoo, conditioner, body wash, deodorant, toothpaste, toothbrush, floss, mouthwash, razors, shaving cream, lotion, soap bars
-    Pet supplies: Fresh Step, Tidy Cats, arm & hammer litter, cat litter, dog food, cat food, pet treats, flea treatment
-    Household misc: trash bags, garbage bags, aluminum foil, plastic wrap, ziplock bags, batteries, light bulbs, matches, cotton balls, cotton swabs
-  FOOD (anything you eat or drink — even snacks, candy, supplements, baby formula, alcohol, soda):
-    All meats, fish, dairy, eggs, produce, bread, cereal, snacks, beverages, condiments, frozen meals, canned goods, candy, ice cream, baby formula, protein powder, vitamins/supplements
-    Alcohol of all kinds counts as Food
-    When in doubt: if a human consumes it by eating or drinking it, it is Food
+For each item below, return a JSON array in the SAME ORDER as the input.
 
-SHELF LIFE REFERENCE — use the most specific match for the item:
+For each item return EXACTLY these fields:
+- full_name: The complete, properly capitalized brand name and product name as it would appear on a store shelf. Expand ALL receipt abbreviations. Examples: "BNLS CHICK BRST" -> "Boneless Chicken Breast", "BUIT 5 CHSE TORTEL" -> "Buitoni 5 Cheese Tortellini", "GW BRWN SGR BAC" -> "Great Value Brown Sugar Bacon", "SBR BUFF WG MARIND" -> "Sweet Baby Ray's Buffalo Wing Marinade", "KH PRETZEL BUNS" -> "King's Hawaiian Pretzel Buns", "PBX PARMESAN WEDGE" -> "Publix Parmesan Wedge", "FRSH STP XTRM ODOR" -> "Fresh Step Extreme Odor Control Cat Litter", "KH SAVORY DIN ROLL" -> "King's Hawaiian Savory Dinner Rolls", "PUB MILK RF GRN PT 2%" -> "Publix 2% Milk Green Cap", "PUB MLK GRN 2%" -> "Publix 2% Milk Green Cap", "CHOC DPD STRAW" -> "Chocolate Dipped Strawberries", "DELI ROAST CHKN" -> "Deli Rotisserie Chicken". If the name is already clean, return it as-is. CRITICAL: Each input row is exactly ONE product. Never combine two products. Never mix food and non-food words in a single name. "rf" on Publix milk = recycled jug. "grn" on milk = green cap (2% fat). "pt" = pint or half-gallon.
+- expires_in_days: integer — days from purchase until expiration using the recommended storage method
+- storage: "fridge", "freezer", or "pantry" — the best storage method for this item as purchased
+- fridge: integer days in fridge, or null if fridge is unsafe/not applicable
+- freezer: integer days in freezer, or null if freezer is unsafe/not applicable  
+- pantry: integer days in pantry, or null if pantry is unsafe/not applicable
+- category: "Food" or "Household"
 
-CHEESE (be very specific by type):
-- Fresh mozzarella, burrata, ricotta = 5d fridge
-- Brie, camembert, soft-ripened = 7d fridge
-- Cream cheese, mascarpone = 10d fridge
-- Shredded mozzarella, shredded cheese blends = 14d fridge
-- Sliced American, provolone, muenster, swiss = 14d fridge
-- Cheddar block, colby, monterey jack = 30d fridge
-- Parmesan (shredded or grated), romano, asiago = 60d fridge
-- Parmesan (wedge/block), aged gouda, aged cheddar = 90d fridge
+════════════════════════════════════════
+CATEGORY RULES
+════════════════════════════════════════
+HOUSEHOLD — not edible, not drinkable:
+  Paper: Bounty, Charmin, Scott, Kleenex, paper towels, toilet paper, napkins, tissues, paper plates
+  Cleaning: Tide, Gain, Downy, Bounce, Lysol, Febreze, Dawn, Cascade, Windex, Clorox, Swiffer, Fabuloso, Mr. Clean, bleach, dish soap, laundry detergent, dryer sheets, fabric softener, sponges, scrub brushes, Pine-Sol, Comet, Bona, Seventh Generation cleaner
+  Personal care: Cremo, Old Spice, Dove, Pantene, Head & Shoulders, Axe, Degree, Secret, Gillette, shampoo, conditioner, body wash, deodorant, toothpaste, toothbrush, floss, mouthwash, razors, shaving cream, lotion, soap bars, face wash, moisturizer, sunscreen, nail polish, makeup
+  Pet: Fresh Step, Tidy Cats, Arm & Hammer litter, cat litter, dog food, cat food, pet treats, flea treatment, puppy pads
+  Misc: trash bags, garbage bags, aluminum foil, plastic wrap, Ziploc bags, batteries, light bulbs, matches, cotton balls, cotton swabs, first aid items, bandages
+FOOD — anything consumed by eating or drinking:
+  All meats, seafood, dairy, eggs, produce, bread, bakery, cereal, snacks, candy, beverages, condiments, sauces, frozen meals, canned goods, deli items, prepared foods, supplements, protein powder, baby formula, alcohol of any kind
+  When in doubt: if a human eats or drinks it, it is Food
 
-MEAT & SEAFOOD:
-- Raw chicken, turkey, fish, shrimp, scallops = 2d fridge
-- Raw ground beef, ground turkey, ground pork = 2d fridge
-- Raw steak, pork chops, roasts = 3d fridge
-- Bacon, pancetta = 7d fridge
-- Deli meat (opened), hot dogs (opened) = 5d fridge
-- Cooked chicken, cooked meat = 4d fridge
-- Frozen chicken, turkey = 270d freezer
-- Frozen beef, pork = 180d freezer
-- Frozen fish, shrimp = 180d freezer
+════════════════════════════════════════
+SHELF LIFE REFERENCE — USDA/FDA STANDARDS
+Always use the MOST SPECIFIC match. Read every word of the item name.
+════════════════════════════════════════
 
-DAIRY:
-- Whole milk, 2%, skim, buttermilk = 7d fridge
-- Oat milk, almond milk, soy milk (opened) = 7d fridge
-- Heavy cream, half-and-half, whipping cream = 10d fridge
-- Sour cream, cottage cheese = 14d fridge
-- Greek yogurt, regular yogurt = 14d fridge
-- Butter (salted) = 30d fridge
-- Butter (unsalted) = 14d fridge
-- Eggs = 21d fridge
+── COMPOSITE / PREPARED ITEMS (CRITICAL RULE) ──
+When an item is made FROM perishable ingredients, the shelf life is governed by the MOST PERISHABLE component — not the coating or flavoring.
+Examples:
+- Chocolate dipped strawberries = 2d fridge (strawberries spoil in 2-3d, chocolate coating irrelevant)
+- Strawberry cheesecake = 4d fridge (cream cheese + fresh fruit)
+- Fruit tart, fruit flan = 2d fridge (fresh fruit on custard)
+- Chocolate covered cherries (fresh) = 3d fridge
+- Dipped fruit of any kind = 2d fridge
+- Cream-filled pastry, eclair, cream puff = 2d fridge
+- Tiramisu = 3d fridge
+- Cheesecake (plain) = 5d fridge
+- Key lime pie, lemon meringue pie = 4d fridge
+- Pumpkin pie = 4d fridge
+- Pecan pie, apple pie (store bought) = 4d pantry
+- Birthday cake, layer cake with frosting = 4d pantry or 7d fridge
+- Brownies, fudge = 5d pantry
+- Deli pasta salad, potato salad, macaroni salad = 4d fridge
+- Deli coleslaw = 4d fridge
+- Deli chicken salad, tuna salad, egg salad = 3d fridge
+- Hummus (opened) = 7d fridge
+- Guacamole (fresh, opened) = 2d fridge
+- Salsa (fresh/refrigerated) = 7d fridge
+- Queso dip (refrigerated) = 10d fridge
+- Spinach artichoke dip = 5d fridge
+- Buffalo chicken dip = 4d fridge
+- Bean dip = 5d fridge
 
-PRODUCE - FRUIT:
-- Strawberries, raspberries, blackberries = 3d fridge
+── DELI / HOT BAR / PREPARED FOODS ──
+- Rotisserie chicken, deli roast chicken = 4d fridge
+- Deli fried chicken = 3d fridge
+- Deli meatloaf, meatballs = 4d fridge
+- Deli macaroni & cheese = 4d fridge
+- Deli mashed potatoes, deli sides = 4d fridge
+- Deli soup (refrigerated) = 4d fridge
+- Deli pizza slice = 4d fridge
+- Deli sushi = 1d fridge (same day)
+- Prepared sandwiches (deli) = 2d fridge
+- Deli stuffed peppers, stuffed chicken = 4d fridge
+
+── CHEESE ──
+- Fresh mozzarella balls, burrata, fresh ricotta = 5d fridge
+- Brie, camembert, triple cream, soft-ripened = 7d fridge
+- Cream cheese block or spread = 10d fridge
+- Mascarpone = 7d fridge
+- Whipped cream cheese = 10d fridge
+- Shredded mozzarella, shredded pizza blend = 14d fridge
+- Shredded cheddar, shredded Mexican blend = 14d fridge
+- Sliced American, Velveeta slices = 21d fridge
+- Sliced provolone, muenster, havarti = 14d fridge
+- Sliced swiss, sliced pepper jack = 14d fridge
+- Cheddar block (mild, medium, sharp) = 30d fridge
+- Colby jack block, Monterey jack block = 30d fridge
+- Gouda (semi-aged block) = 30d fridge
+- Feta (crumbled or block in brine) = 30d fridge
+- Blue cheese, gorgonzola = 21d fridge
+- Parmesan shredded or grated (refrigerated) = 60d fridge
+- Parmesan wedge or block, Pecorino Romano wedge = 90d fridge
+- Aged gouda, aged cheddar (2yr+) = 90d fridge
+- String cheese, cheese sticks = 21d fridge
+- Cottage cheese = 14d fridge
+- Velveeta block = 60d pantry (unopened), 8 weeks fridge (opened)
+
+── MEAT & POULTRY (RAW) ──
+- Raw chicken breast, thighs, drumsticks, wings = 2d fridge, 270d freezer
+- Raw whole chicken, whole turkey = 2d fridge, 365d freezer
+- Raw ground beef, ground turkey, ground pork, ground chicken = 2d fridge, 120d freezer
+- Raw beef steak (ribeye, NY strip, sirloin, filet) = 3d fridge, 270d freezer
+- Raw pork chops, pork tenderloin = 3d fridge, 180d freezer
+- Raw lamb chops, veal = 3d fridge, 270d freezer
+- Raw ribs (beef or pork) = 3d fridge, 180d freezer
+- Raw beef roast, chuck roast, brisket = 4d fridge, 365d freezer
+- Raw liver, organ meats = 2d fridge, 90d freezer
+
+── MEAT & POULTRY (PROCESSED/COOKED) ──
+- Bacon (raw, unopened) = 7d fridge, 30d freezer
+- Bacon (opened package) = 7d fridge
+- Pancetta = 7d fridge, 30d freezer
+- Prosciutto, serrano ham (sliced) = 5d fridge, 60d freezer
+- Salami, pepperoni (sliced deli) = 5d fridge, 60d freezer
+- Deli turkey, deli ham, deli chicken (sliced) = 5d fridge, 60d freezer
+- Deli roast beef = 5d fridge
+- Bologna, liverwurst = 5d fridge
+- Hot dogs (opened) = 7d fridge, 60d freezer
+- Hot dogs (unopened) = 14d fridge, 60d freezer
+- Smoked sausage, kielbasa, andouille (cooked) = 14d fridge, 60d freezer
+- Bratwurst (raw) = 3d fridge, 60d freezer
+- Italian sausage (raw links) = 3d fridge, 60d freezer
+- Cooked chicken, cooked turkey = 4d fridge, 120d freezer
+- Cooked beef, cooked pork = 4d fridge, 90d freezer
+- Rotisserie chicken = 4d fridge, 90d freezer
+- Fully cooked bacon, precooked bacon = 14d fridge
+- Pulled pork (cooked, vacuum sealed) = 14d fridge, 90d freezer
+- Corned beef (cooked) = 4d fridge
+- Pastrami (deli sliced) = 5d fridge
+
+── SEAFOOD ──
+- Raw salmon, tuna, halibut, cod, tilapia, mahi-mahi = 2d fridge, 180d freezer
+- Raw shrimp, scallops, clams, mussels = 2d fridge, 180d freezer
+- Raw lobster, crab (live or fresh) = 1d fridge
+- Canned tuna, canned salmon, canned sardines = 1095d pantry
+- Canned crab, canned clams = 1095d pantry
+- Smoked salmon (vacuum sealed, refrigerated) = 14d fridge, 60d freezer
+- Smoked oysters (canned) = 1095d pantry
+- Imitation crab meat = 5d fridge, 90d freezer
+- Cooked shrimp = 3d fridge, 90d freezer
+- Fish sticks, breaded fish (frozen) = 180d freezer
+- Lox (opened) = 5d fridge
+
+── DAIRY ──
+- Whole milk, 2% milk, skim milk, 1% milk = 7d fridge
+- Chocolate milk = 7d fridge
+- Buttermilk = 14d fridge
+- Oat milk, almond milk, soy milk, coconut milk (opened carton) = 7d fridge
+- Oat milk, almond milk, soy milk (unopened shelf-stable) = 365d pantry
+- Heavy cream, heavy whipping cream = 10d fridge
+- Half and half, half & half = 10d fridge
+- Whipping cream (regular) = 10d fridge
+- Coffee creamer (liquid, refrigerated) = 14d fridge
+- Coffee creamer (powdered) = 180d pantry
+- Sour cream = 14d fridge
+- Crème fraîche = 14d fridge
+- Greek yogurt (plain or flavored) = 14d fridge
+- Regular yogurt, skyr = 14d fridge
+- Drinkable yogurt, Kefir = 14d fridge
+- Butter (salted block) = 30d fridge, 365d freezer
+- Butter (unsalted block) = 14d fridge, 365d freezer
+- Whipped butter = 14d fridge
+- Ghee (clarified butter) = 90d pantry
+- Eggs (large, white, brown — any) = 35d fridge
+- Hard boiled eggs = 7d fridge
+- Egg whites (carton) = 7d fridge
+- Eggnog = 5d fridge
+- Whipped cream (can, Cool Whip tub) = 14d fridge
+- Condensed milk (unopened can) = 730d pantry
+- Evaporated milk (unopened can) = 730d pantry
+
+── PRODUCE — FRUIT ──
+- Strawberries = 3d fridge
+- Raspberries, blackberries = 2d fridge
 - Blueberries = 7d fridge
-- Grapes, cherries = 5d fridge
-- Ripe bananas = 3d pantry, unripe bananas = 7d pantry
-- Apples = 21d fridge
-- Oranges, grapefruits, lemons, limes = 14d fridge
-- Avocado (ripe) = 2d pantry, avocado (unripe) = 5d pantry
-- Peaches, plums, nectarines (ripe) = 3d fridge
+- Grapes (red, green, cotton candy) = 5d fridge
+- Cherries = 5d fridge
+- Ripe bananas = 3d pantry
+- Unripe bananas = 7d pantry
+- Apples (bagged or loose) = 21d fridge
+- Pears (ripe) = 5d fridge
+- Peaches, nectarines, plums (ripe) = 3d fridge
+- Peaches, nectarines, plums (unripe) = 5d pantry
 - Mango (ripe) = 3d fridge
-- Pineapple (whole) = 5d pantry
+- Mango (unripe) = 5d pantry
+- Papaya (ripe) = 3d fridge
+- Kiwi (ripe) = 5d fridge
+- Oranges, mandarins, clementines = 14d fridge
+- Grapefruits = 14d fridge
+- Lemons, limes = 21d fridge
+- Avocado (ripe, soft) = 2d pantry or 3d fridge
+- Avocado (firm, unripe) = 5d pantry
+- Cantaloupe, honeydew (whole) = 7d pantry
+- Cantaloupe, honeydew (cut) = 4d fridge
 - Watermelon (whole) = 10d pantry
+- Watermelon (cut) = 4d fridge
+- Pineapple (whole) = 5d pantry
+- Pineapple (cut) = 4d fridge
+- Pomegranate (whole) = 14d fridge
+- Dates, dried figs = 365d pantry
+- Raisins, dried cranberries, dried apricots = 365d pantry
 
-PRODUCE - VEGETABLES:
-- Spinach, arugula, mixed greens = 5d fridge
-- Lettuce (head), romaine = 7d fridge
-- Broccoli, cauliflower, brussels sprouts = 5d fridge
-- Mushrooms = 5d fridge
+── PRODUCE — VEGETABLES ──
+- Spinach, baby spinach, arugula = 5d fridge
+- Spring mix, mesclun, mixed greens = 5d fridge
+- Romaine hearts, romaine head = 7d fridge
+- Iceberg lettuce (head) = 14d fridge
+- Butter lettuce, Bibb lettuce = 5d fridge
+- Kale, Swiss chard, collard greens = 7d fridge
+- Broccoli (head or florets) = 5d fridge
+- Cauliflower = 7d fridge
+- Brussels sprouts = 5d fridge
+- Broccolini, broccoflower = 5d fridge
+- Mushrooms (white button, cremini, portobello) = 5d fridge
 - Asparagus = 3d fridge
-- Zucchini, summer squash = 5d fridge
-- Bell peppers = 7d fridge
+- Green beans, haricots verts, snap peas = 5d fridge
+- Edamame (fresh) = 3d fridge
+- Zucchini, yellow squash = 5d fridge
+- Bell peppers (whole) = 7d fridge
+- Jalapeños, serranos, poblanos = 7d fridge
 - Cucumber = 7d fridge
-- Tomatoes (ripe) = 5d pantry
 - Corn on the cob = 2d fridge
-- Green beans, snap peas = 5d fridge
-- Carrots (baby or whole) = 21d fridge
+- Tomatoes (ripe, whole) = 5d pantry
+- Cherry tomatoes, grape tomatoes = 7d pantry
+- Carrots (whole or baby, bagged) = 21d fridge
 - Celery = 14d fridge
-- Onions, shallots = 30d pantry
+- Radishes = 14d fridge
+- Fennel bulb = 7d fridge
+- Artichokes = 5d fridge
+- Leeks = 7d fridge
+- Green onions, scallions = 5d fridge
+- Onions (yellow, white, red) = 30d pantry
+- Shallots = 30d pantry
 - Garlic (whole head) = 90d pantry
-- Potatoes (russet, yukon gold) = 30d pantry
-- Sweet potatoes = 21d pantry
-- Cabbage, kale = 14d fridge
+- Garlic (minced, refrigerated jar) = 90d fridge
+- Potatoes (russet, Yukon gold, red) = 30d pantry
+- Sweet potatoes, yams = 21d pantry
+- Butternut squash, acorn squash (whole) = 60d pantry
+- Cabbage (whole head) = 14d fridge
+- Brussels sprouts (on stalk) = 5d fridge
+- Bok choy = 5d fridge
+- Bean sprouts = 3d fridge
+- Pre-cut vegetable medley = 4d fridge
+- Bagged salad kit (Caesar, etc.) = 5d fridge
 
-BREAD & BAKERY:
-- Sliced sandwich bread = 5d pantry
-- Bagels, English muffins = 5d pantry
-- Tortillas (flour or corn) = 7d pantry
-- Dinner rolls, hamburger buns = 5d pantry
+── FRESH HERBS ──
+- Basil (fresh bunch) = 3d pantry (room temp in water)
+- Cilantro, parsley, dill, mint (fresh) = 5d fridge
+- Rosemary, thyme, sage (fresh) = 7d fridge
+- Chives = 5d fridge
+
+── BREAD & BAKERY ──
+- Sliced sandwich bread, white or wheat = 5d pantry, 90d freezer
+- Whole grain bread, multigrain = 5d pantry
+- Sourdough loaf = 5d pantry
+- Bagels = 5d pantry, 90d freezer
+- English muffins = 7d pantry
+- Flour tortillas = 7d pantry, 90d freezer
+- Corn tortillas = 7d pantry
+- Dinner rolls, Hawaiian rolls, potato rolls = 5d pantry
+- Hamburger buns, hot dog buns = 5d pantry
 - Pita bread = 5d pantry
-- Croissants, pastries = 2d pantry
+- Naan bread = 5d pantry
+- Croissants (plain, plain butter) = 2d pantry
+- Donuts, glazed donuts = 2d pantry
+- Muffins (bakery fresh) = 3d pantry
+- Cinnamon rolls (bakery fresh) = 2d pantry
+- Coffee cake = 3d pantry
+- Pound cake, loaf cake = 4d pantry
+- Banana bread = 4d pantry
+- Scones = 2d pantry
+- Biscotti = 14d pantry
+- Breadsticks = 5d pantry
+- Focaccia = 3d pantry
 
-PANTRY / DRY GOODS:
-- Dry pasta, rice, quinoa, oats = 730d pantry
-- Canned beans, canned vegetables = 730d pantry
-- Canned soup, broth = 730d pantry
+── PREPARED/DELI BAKERY ITEMS WITH PERISHABLE FILLINGS ──
+CRITICAL: These contain perishable dairy or fresh fruit — their shelf life is SHORT:
+- Cream puffs, eclairs, profiteroles = 2d fridge
+- Cannoli (filled) = 2d fridge
+- Tiramisu = 3d fridge
+- Cheesecake (plain, NY style) = 5d fridge
+- Cheesecake (with fresh fruit topping) = 3d fridge
+- Chocolate dipped strawberries = 2d fridge
+- Chocolate covered strawberries = 2d fridge
+- Chocolate dipped fruit (any fresh fruit) = 2d fridge
+- Fruit tart, fruit flan, fresh fruit pastry = 2d fridge
+- Strawberry shortcake = 2d fridge
+- Tres leches cake = 4d fridge
+- Mousse cake, mirror glaze cake = 4d fridge
+- Custard tart, egg tart = 3d fridge
+- Boston cream pie = 3d fridge
+- Layer cake with whipped cream frosting = 3d fridge
+- Layer cake with buttercream frosting = 5d pantry or 7d fridge
+- Cupcakes (buttercream) = 2d pantry
+- Cupcakes (whipped cream) = 2d fridge
+- Key lime pie = 4d fridge
+- Lemon meringue pie = 2d fridge
+- Pumpkin pie = 4d fridge
+- Pecan pie = 4d pantry
+- Apple pie, cherry pie (baked) = 2d pantry or 4d fridge
+- Blueberry pie = 2d pantry
+
+── FROZEN FOODS ──
+- Frozen chicken breasts, thighs, wings = 270d freezer
+- Frozen ground beef, ground turkey = 120d freezer
+- Frozen beef patties, burgers = 120d freezer
+- Frozen fish fillets, fish sticks = 180d freezer
+- Frozen shrimp, frozen scallops = 180d freezer
+- Frozen pizza (any brand) = 180d freezer
+- Frozen vegetables (peas, corn, broccoli, etc.) = 365d freezer
+- Frozen fruit (strawberries, blueberries, mango, etc.) = 365d freezer
+- Ice cream, gelato, sherbet = 180d freezer
+- Frozen yogurt = 120d freezer
+- Popsicles, ice pops = 365d freezer
+- Frozen meals (Lean Cuisine, Healthy Choice, Marie Callender's, Stouffer's) = 180d freezer
+- Frozen burritos, frozen hot pockets = 180d freezer
+- Frozen waffles, pancakes, French toast sticks = 180d freezer
+- Frozen meatballs = 180d freezer
+- Frozen edamame = 365d freezer
+- Frozen dinner rolls = 180d freezer
+- Frozen pie shells, frozen pastry dough = 180d freezer
+- Frozen stir fry kits = 365d freezer
+
+── CONDIMENTS & SAUCES ──
+- Ketchup (opened) = 180d fridge
+- Mustard (opened) = 180d fridge
+- Mayonnaise (opened, refrigerated) = 60d fridge
+- Miracle Whip (opened) = 60d fridge
+- Ranch dressing (opened, refrigerated) = 60d fridge
+- Italian dressing (opened) = 90d fridge
+- Caesar dressing (opened, refrigerated) = 60d fridge
+- Balsamic vinegar, red wine vinegar = 1095d pantry
+- Soy sauce, tamari = 730d pantry
+- Hot sauce (Frank's, Tabasco, Cholula) = 730d pantry
+- BBQ sauce (opened) = 180d fridge
+- Teriyaki sauce (opened) = 180d fridge
+- Sriracha (opened) = 365d pantry
+- Salsa (jarred, opened) = 30d fridge
+- Salsa (fresh/refrigerated, opened) = 7d fridge
+- Guacamole (fresh, refrigerated, opened) = 2d fridge
+- Hummus (opened) = 7d fridge
+- Pesto (refrigerated, opened) = 7d fridge
+- Pesto (jarred, shelf stable) = 14d fridge after opening
+- Tomato sauce, marinara (jarred, opened) = 7d fridge
+- Alfredo sauce (jarred, opened) = 5d fridge
+- Olive tapenade = 14d fridge
+- Dijon mustard = 365d fridge
+- Honey mustard = 365d fridge
+- Worcestershire sauce = 365d pantry
+- Fish sauce = 730d pantry
+- Oyster sauce = 365d fridge
+- Hoisin sauce = 365d fridge
+- Pickle relish (opened) = 365d fridge
+- Capers (opened) = 365d fridge
+- Olives (opened jar) = 90d fridge
+- Pickles (opened jar) = 90d fridge
+- Jam, jelly, preserves (opened) = 180d fridge
+- Maple syrup (opened) = 365d fridge
+- Agave, molasses = 365d pantry
+
+── PANTRY / DRY GOODS ──
+- Dry pasta (spaghetti, penne, rotini, etc.) = 730d pantry
+- Rice (white, jasmine, basmati) = 1825d pantry
+- Brown rice = 180d pantry
+- Quinoa, farro, barley, bulgur = 730d pantry
+- Rolled oats, steel cut oats, instant oats = 730d pantry
+- Canned beans (black, kidney, chickpeas, etc.) = 730d pantry
+- Canned corn, canned green beans, canned peas = 730d pantry
+- Canned tomatoes, tomato paste = 730d pantry
+- Canned soup, canned broth, canned chili = 730d pantry
 - Canned tuna, canned salmon = 1095d pantry
-- Chips, pretzels = 60d pantry
-- Crackers, cookies = 90d pantry
-- Cereal = 180d pantry
-- Peanut butter, almond butter = 180d pantry
-- Olive oil, vegetable oil = 365d pantry
-- Flour = 365d pantry
-- Sugar, salt = 3650d pantry
-- Honey = 3650d pantry
-- Coffee (whole bean or ground, sealed) = 180d pantry
-- Spices = 730d pantry
+- Canned sardines, canned anchovies = 1095d pantry
+- Canned coconut milk = 730d pantry
+- Chips (potato, tortilla, kettle) = 60d pantry
+- Pretzels = 60d pantry
+- Popcorn (microwave, bagged) = 90d pantry
+- Crackers (Ritz, Wheat Thins, Triscuit) = 90d pantry
+- Cookies (Oreos, Chips Ahoy, etc.) = 90d pantry
+- Granola bars, protein bars = 180d pantry
+- Trail mix, mixed nuts = 90d pantry
+- Cereal (any kind) = 180d pantry
+- Pancake mix, waffle mix = 365d pantry
+- Bread crumbs, panko = 180d pantry
+- Peanut butter, almond butter, sunflower butter = 180d pantry
+- Nutella, hazelnut spread = 180d pantry
+- Olive oil, avocado oil = 365d pantry
+- Vegetable oil, canola oil, coconut oil = 365d pantry
+- Sesame oil = 180d pantry
+- All-purpose flour, bread flour = 365d pantry
+- Almond flour, coconut flour = 180d pantry
+- White sugar, brown sugar = 3650d pantry
+- Powdered sugar, confectioners sugar = 3650d pantry
+- Salt (table, kosher, sea salt) = 3650d pantry
+- Honey (pure) = 3650d pantry
+- Maple syrup (unopened) = 1095d pantry
+- Coffee (whole bean, sealed) = 180d pantry
+- Coffee (ground, sealed) = 90d pantry
+- Instant coffee = 730d pantry
+- Tea bags, loose leaf tea = 730d pantry
+- Baking soda = 180d pantry
+- Baking powder = 180d pantry
+- Cornstarch = 730d pantry
+- Vanilla extract = 1825d pantry
+- Cocoa powder = 730d pantry
+- Chocolate chips = 730d pantry
+- Chocolate bar (dark, milk, white) = 365d pantry
+- Candy (hard candy, gummies, M&Ms, Skittles) = 365d pantry
+- Dried pasta sauce mix = 730d pantry
+- Ramen noodles, instant noodles = 365d pantry
+- Spices and dried herbs (any) = 730d pantry
+- Yeast (active dry, instant) = 365d pantry
+- Gelatin, pudding mix = 730d pantry
+- Protein powder (sealed tub) = 365d pantry
+- Vitamins, supplements = 730d pantry
 
-FROZEN:
-- Frozen pizza = 180d freezer
-- Frozen vegetables, frozen fruit = 365d freezer
-- Ice cream, frozen yogurt = 180d freezer
-- Frozen meals, frozen burritos = 180d freezer
-
-BEVERAGES:
-- Orange juice, apple juice (opened) = 7d fridge
-- Soda (unopened cans/bottles) = 270d pantry
-- Wine (opened) = 3d pantry
-- Beer (unopened) = 180d pantry
-- Hard seltzer (White Claw, Truly, Nutrl, Bud Light Seltzer, etc.) = 365d pantry, fridge=null, freezer=null
+── BEVERAGES ──
+- Orange juice (refrigerated carton, opened) = 7d fridge
+- Apple juice, grape juice (opened) = 7d fridge
+- Cold brew coffee (bottled, opened) = 7d fridge
+- Lemonade (refrigerated, opened) = 7d fridge
+- Sports drinks (Gatorade, Powerade, opened) = 5d fridge
+- Kombucha (opened) = 7d fridge
+- Coconut water (opened) = 5d fridge
+- Energy drinks (unopened cans) = 270d pantry
+- Soda (Coke, Pepsi, Sprite — unopened cans/bottles) = 270d pantry
+- Sparkling water, LaCroix (unopened) = 365d pantry
+- Bottled water = 730d pantry
+- Beer (craft or domestic, unopened) = 180d pantry
+- Wine (red or white, unopened bottle) = 730d pantry
+- Wine (opened bottle) = 5d pantry
+- Champagne, prosecco (opened) = 3d fridge
+- Hard seltzer (White Claw, Truly, Nutrl, Bud Light Seltzer — unopened) = 365d pantry, fridge=null, freezer=null
+- Hard cider (unopened) = 365d pantry
 - Canned cocktails, wine coolers, hard lemonade = 365d pantry, fridge=null, freezer=null
-- Liquor (vodka, whiskey, rum, tequila, gin) = 3650d pantry, fridge=null, freezer=null
+- Malt beverages (Twisted Tea, Smirnoff Ice) = 365d pantry
+- Liquor (vodka, whiskey, bourbon, rum, tequila, gin, brandy) = 3650d pantry, fridge=null, freezer=null
+- Cream liqueurs (Baileys) = 365d pantry
+- Vermouth (opened) = 60d fridge
 
-STRICT RULES — never break these no matter what the item is:
-- NEVER assign pantry days to raw meat, poultry, seafood, deli meat, or fresh dairy
-- NEVER assign more than 7 days fridge to raw chicken, fish, or ground meat
-- NEVER return more than 365 days for any perishable food item
-- If an item is pantry-only (cat litter, detergent, liquor, hard seltzer), set fridge=null and freezer=null
-- If an item is fridge-only (raw meat, most fresh produce), set pantry=null
-- Always return all three storage types (fridge, freezer, pantry) — use null for any that are not safe
+── INTERNATIONAL / SPECIALTY ──
+- Kimchi (opened) = 90d fridge
+- Miso paste = 180d fridge
+- Tahini (opened) = 90d pantry
+- Coconut aminos = 365d pantry
+- Rice vinegar = 1095d pantry
+- Mirin = 365d pantry
+- Rice wine = 365d pantry
+- Gochujang, doenjang = 365d fridge
+- Harissa = 30d fridge (opened)
+- Tzatziki (opened) = 5d fridge
+- Babaganoush = 5d fridge
+- Naan (fresh, bakery) = 3d pantry
+- Injera = 3d pantry
+- Wonton wrappers, gyoza wrappers = 7d fridge
+- Fresh udon, soba noodles = 5d fridge
+- Tofu (firm, silken — opened) = 5d fridge
+- Tempeh = 7d fridge
+- Seitan = 7d fridge
 
-HOUSEHOLD (non-food):
+── BABY & INFANT ──
+- Baby formula (powder, sealed) = 365d pantry
+- Baby food pouches (sealed) = 730d pantry
+- Baby food (opened jar or pouch) = 2d fridge
+- Breast milk (refrigerated) = 4d fridge
+
+── HOUSEHOLD (non-food expiry) ──
 - Cleaning products, laundry detergent, dish soap = 730d pantry
-- Paper products (towels, toilet paper, napkins) = 3650d pantry
-- Personal care (shampoo, toothpaste, deodorant) = 730d pantry
-- Cat litter, pet supplies = 730d pantry
+- Paper towels, toilet paper, napkins, tissues = 3650d pantry
+- Personal care (shampoo, conditioner, body wash) = 730d pantry
+- Toothpaste, mouthwash, deodorant = 730d pantry
+- Cat litter, dog food/treats, pet supplies = 730d pantry
+- Trash bags, plastic wrap, aluminum foil, Ziploc = 3650d pantry
+- Batteries, light bulbs = 3650d pantry
+- First aid, bandages, antiseptic = 730d pantry
+
+════════════════════════════════════════
+ABSOLUTE RULES — NEVER VIOLATE THESE
+════════════════════════════════════════
+1. COMPOSITE RULE: If an item contains fresh fruit, fresh cream, whipped cream, or custard as a component, its shelf life is governed by the most perishable ingredient. "Chocolate dipped strawberries" = 2d fridge because strawberries spoil in 2-3d. Chocolate coating does NOT extend strawberry shelf life.
+2. NEVER assign pantry days to raw meat, raw poultry, raw seafood, deli meat, fresh dairy, or any item that requires refrigeration.
+3. NEVER assign more than 7 days fridge to raw chicken, raw fish, raw ground meat, or raw shellfish.
+4. NEVER exceed 365 days for any fresh, refrigerated, or perishable food.
+5. Liquor (spirits), hard seltzer, hard cider, and canned cocktails: set fridge=null and freezer=null always.
+6. Pantry-only non-perishables (cat litter, laundry detergent, dish soap): set fridge=null and freezer=null.
+7. ALWAYS return all three storage values (fridge, freezer, pantry). Use null for any that are unsafe or inapplicable.
+8. Each item in the input is ONE product. Never merge two products. Never split one product into two.
+9. If the item name is ambiguous, default to the interpretation that results in the SHORTER, SAFER shelf life.
+10. Fresh bakery items from the store deli (cakes, pies, pastries) have SHORT shelf lives. Do not apply pantry shelf life to cream-filled or fresh-fruit items.
 
 Items:
 {items_json}
