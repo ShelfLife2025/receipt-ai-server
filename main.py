@@ -645,6 +645,16 @@ If the name is already clean, return it as-is. CRITICAL: Each input row is exact
 - freezer: integer days in freezer, or null if freezer is unsafe/not applicable  
 - pantry: integer days in pantry, or null if pantry is unsafe/not applicable
 - category: "Food" or "Household"
+- food_category: the specific display subcategory for this item. Must be EXACTLY one of these values:
+  Food items: "Produce", "Meat & Seafood", "Dairy & Eggs", "Bread & Bakery", "Deli", "Beverages", "Snacks & Candy", "Cereal & Breakfast", "Other"
+  Non-food items: "Household"
+  RULES: "Produce" = fresh fruits and vegetables. "Meat & Seafood" = raw or cooked meat, poultry, seafood. "Dairy & Eggs" = milk, cheese, yogurt, butter, eggs, cream. "Bread & Bakery" = bread, tortillas, rolls, bagels, pastries, cakes, pies, cookies. "Deli" = deli meats, prepared hot bar items, rotisserie chicken, deli sides. "Beverages" = juice, soda, water, beer, wine, spirits, energy drinks, coffee, tea. "Snacks & Candy" = chips, crackers, nuts, candy, granola bars, popcorn, pretzels. "Cereal & Breakfast" = cereal, oatmeal, pancake mix, breakfast bars, granola. "Other" = pantry staples, canned goods, condiments, sauces, frozen meals, spices, supplements, baby food, international foods, anything that doesn't clearly fit above. "Household" = ONLY for non-food, non-drinkable items (cleaning supplies, paper goods, personal care, pet supplies, batteries).
+- photo_query: the single best Unsplash search query to find an accurate product photo. This must be a 2-5 word phrase that describes what the item LOOKS LIKE as a physical object on a white or clean background. RULES:
+  - Use the generic food name, NOT the brand name ("sliced white bread" not "Wonder Bread")
+  - Be specific enough to get the right photo ("raw chicken breast" not "chicken", "shredded cheddar cheese" not "cheese")
+  - For household items, describe the product container/object ("liquid laundry detergent bottle", "paper towel roll", "deodorant stick")
+  - Always end with "white background" for clean product-style shots
+  - EXAMPLES: "fresh strawberries white background", "raw chicken breast white background", "shredded cheddar cheese white background", "baby spinach bag white background", "greek yogurt cup white background", "tide laundry detergent bottle white background", "kirkland diapers bag white background", "orange juice carton white background"
 
 ════════════════════════════════════════
 CATEGORY RULES
@@ -1161,6 +1171,16 @@ Respond with ONLY a valid JSON array, no markdown."""
                     # Fall back to keyword classifier only if Gemini returned something invalid
                     gemini_category = (result.get("category") or "").strip()
                     our_category = gemini_category if gemini_category in ("Food", "Household") else _classify(final_name_for_classify)
+
+                    # New: food_category (display subcategory) and photo_query from Gemini
+                    valid_food_categories = {
+                        "Produce", "Meat & Seafood", "Dairy & Eggs", "Bread & Bakery",
+                        "Deli", "Beverages", "Snacks & Candy", "Cereal & Breakfast",
+                        "Other", "Household"
+                    }
+                    gemini_food_category = (result.get("food_category") or "").strip()
+                    our_food_category = gemini_food_category if gemini_food_category in valid_food_categories else None
+                    gemini_photo_query = (result.get("photo_query") or "").strip()
                     # Gemini is the authority on shelf life — it has the full reference table
                     # and knows the specific product/brand. Our rules DB is only a safety fallback.
                     gemini_days_raw = result.get("expires_in_days")
@@ -1232,6 +1252,8 @@ Respond with ONLY a valid JSON array, no markdown."""
                         "expires_in_days": shelf_days,
                         "storage": shelf_storage,
                         "category": our_category,
+                        "food_category": our_food_category,
+                        "photo_query": gemini_photo_query or None,
                         "is_estimated": True,
                         "confidence": shelf_confidence,
                         "shelf_life_by_storage": slbs,
@@ -2964,10 +2986,12 @@ def _public_base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def _image_url_for_item(base_url: str, name: str, category: Optional[str] = None) -> str:
+def _image_url_for_item(base_url: str, name: str, category: Optional[str] = None, photo_query: Optional[str] = None) -> str:
     url = f"{base_url}/image?name={urllib.parse.quote((name or '').strip())}"
     if category:
         url += f"&category={urllib.parse.quote(category.strip())}"
+    if photo_query:
+        url += f"&photo_query={urllib.parse.quote(photo_query.strip())}"
     return url
 
 
@@ -4649,11 +4673,18 @@ async def parse_receipt(
             it["shelf_life_by_storage"] = info.get("shelf_life_by_storage")
             if info.get("category"):
                 it["category"] = info["category"]
+            # Pass through food_category (display subcategory) from Gemini
+            if info.get("food_category"):
+                it["food_category"] = info["food_category"]
+            # Pass through photo_query from Gemini for smarter image lookup
+            if info.get("photo_query"):
+                it["photo_query"] = info["photo_query"]
             # Apply Gemini's full name if available
             gemini_name = (info.get("full_name") or "").strip()
             if gemini_name and len(gemini_name) >= 3:
                 it["name"] = gemini_name
-                it["image_url"] = _image_url_for_item(base_url, gemini_name, it.get("category"))
+                # Include photo_query in image URL so the /image endpoint uses Gemini's exact query
+                it["image_url"] = _image_url_for_item(base_url, gemini_name, it.get("category"), it.get("photo_query"))
 
     return items
 
@@ -6163,7 +6194,7 @@ async def _spoonacular_image(name: str) -> Optional[str]:
     return None
 
 
-async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str]:
+async def _unsplash_image(name: str, is_household: bool = False, photo_query: Optional[str] = None) -> Optional[str]:
     """
     Search Unsplash for a product photo.
     ── Smart query logic ───────────────────────────────────────────────────────
@@ -6199,8 +6230,13 @@ async def _unsplash_image(name: str, is_household: bool = False) -> Optional[str
                         override_query = val
                         print(f"[UNSPLASH OVERRIDE] '{name}' matched key '{key}'", flush=True)
                         break
-                        
-        # ── STEP 2: Build smart suffix for non-override items ───────────────────
+
+
+        # Gemini returned an exact query for this item — use it when we have no override
+        if photo_query and not override_query:
+            override_query = photo_query
+            print(f"[UNSPLASH GEMINI QUERY] '{name}' using Gemini photo_query: '{photo_query}'", flush=True)
+
         # Detect item type for suffix selection
         packaged_signals = [
             "fillet", "fillets", "nugget", "nuggets", "strip", "strips", "tender", "tenders",
@@ -6663,7 +6699,7 @@ async def _kroger_image(name: str) -> Optional[str]:
 
 
 @app.get("/image")
-async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(None), product_id: Optional[str] = Query(None), category: Optional[str] = Query(None)):
+async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(None), product_id: Optional[str] = Query(None), category: Optional[str] = Query(None), photo_query: Optional[str] = Query(None)):
     ck = _cache_key(name, upc, product_id)
 
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
@@ -6720,27 +6756,67 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     is_household = (category or "").lower() == "household" or _is_household_item(name)
 
-    # ── EXPAND NAME WITH GEMINI BEFORE IMAGE SEARCH ──────────────────────────
+    # ── EXPAND NAME WITH GEMINI BEFORE IMAGE SEARCH ──────────────
     # Turns "Ck Sl Cookie" -> "Chocolate Slice Cookie" before searching
     name = await _expand_receipt_name(name)
 
-    # ── STEP 1: Spoonacular (generic, non-branded ingredient images) ────────────
-    if not img_url and not is_household:
+    # ── STEP 1: Unsplash with Gemini photo_query (BEST PHOTOS — run first when available) ──
+    # Gemini picked the exact right search term for this item.
+    # A targeted query like "raw chicken breast white background" beats anything
+    # Spoonacular or Kroger would guess, so we run this first when we have it.
+    if not img_url and photo_query:
         try:
-            img_url = await _spoonacular_image(name)
+            img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
+            if img_url:
+                print(f"[UNSPLASH GEMINI FIRST] '{name}' -> got photo from Gemini query", flush=True)
         except Exception as e:
-            print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+            print(f"[UNSPLASH GEMINI FIRST] error for '{name}': {e}", flush=True)
 
-    # ── STEP 2: Kroger API (branded product photos — fallback for misses) ───────
+    # ── STEP 2: Parallel fallback — Spoonacular + Kroger + Edamam simultaneously ──
+    # Only runs if Gemini query missed or no photo_query was provided.
+    # All three fire at the same time instead of waiting one by one.
     if not img_url:
-        try:
-            img_url = await _kroger_image(name)
-            if img_url and not _is_good_product_image(img_url):
-                print(f"[KROGER] rejected bad image for '{name}': {img_url}", flush=True)
-                img_url = None
-        except Exception as e:
-            print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
+        async def _safe_spoonacular() -> Optional[str]:
+            if is_household:
+                return None
+            try:
+                return await _spoonacular_image(name)
+            except Exception as e:
+                print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+                return None
 
+        async def _safe_kroger() -> Optional[str]:
+            try:
+                result = await _kroger_image(name)
+                if result and not _is_good_product_image(result):
+                    print(f"[KROGER] rejected bad image for '{name}': {result}", flush=True)
+                    return None
+                return result
+            except Exception as e:
+                print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
+                return None
+
+        async def _safe_edamam() -> Optional[str]:
+            if is_household:
+                return None
+            try:
+                return await _edamam_food_image(name)
+            except Exception as e:
+                print(f"[EDAMAM FOOD IMAGE] error for '{name}': {e}", flush=True)
+                return None
+
+        spoon_url, kroger_url, edamam_url = await asyncio.gather(
+            _safe_spoonacular(),
+            _safe_kroger(),
+            _safe_edamam(),
+        )
+        # Priority: Spoonacular (clean ingredient shots) > Kroger (branded) > Edamam
+        img_url = spoon_url or kroger_url or edamam_url
+        if img_url:
+            source = "spoonacular" if spoon_url else ("kroger" if kroger_url else "edamam")
+            print(f"[PARALLEL IMAGE] '{name}' -> {source}", flush=True)
+
+    # ── Kroger retry with stripped brand name ──────────────────────────────
     if not img_url and stripped_name:
         print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
         try:
@@ -6750,27 +6826,23 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 3: Edamam Food Database (fallback for further misses) ─────────────
-    if not img_url and not is_household:
-        try:
-            img_url = await _edamam_food_image(name)
-        except Exception as e:
-            print(f"[EDAMAM FOOD IMAGE] error for '{name}': {e}", flush=True)
-
+    # ── Edamam retry with stripped brand name ──────────────────────────────
     if not img_url and not is_household and stripped_name:
         try:
             img_url = await _edamam_food_image(stripped_name)
         except Exception:
             pass
 
-    # ── STEP 3: Unsplash (last resort before Freepik) ─────────────────────────
+    # ── STEP 3: Unsplash without Gemini query (override dict + smart suffix) ──────
+    # This runs when Gemini didn't provide a photo_query or all above missed.
+    # Still uses the 673-entry override dict and smart suffix logic.
     if not img_url:
         try:
             img_url = await _unsplash_image(name, is_household=is_household)
         except Exception as e:
             print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
 
-    # ── STEP 4: Freepik (dead last resort) ───────────────────────────────────
+    # ── STEP 4: Freepik (dead last resort) ──────────────────────────────
     if not img_url:
         try:
             img_url = await _freepik_image(name)
