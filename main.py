@@ -648,7 +648,8 @@ If the name is already clean, return it as-is. CRITICAL: Each input row is exact
 - food_category: the specific display subcategory for this item. Must be EXACTLY one of these values:
   Food items: "Produce", "Meat & Seafood", "Dairy & Eggs", "Bread & Bakery", "Deli", "Beverages", "Snacks & Candy", "Cereal & Breakfast", "Other"
   Non-food items: "Household"
-  RULES: "Produce" = fresh fruits and vegetables. "Meat & Seafood" = raw or cooked meat, poultry, seafood. "Dairy & Eggs" = milk, cheese, yogurt, butter, eggs, cream. "Bread & Bakery" = bread, tortillas, rolls, bagels, pastries, cakes, pies, cookies. "Deli" = deli meats, prepared hot bar items, rotisserie chicken, deli sides. "Beverages" = juice, soda, water, beer, wine, spirits, energy drinks, coffee, tea. "Snacks & Candy" = chips, crackers, nuts, candy, granola bars, popcorn, pretzels. "Cereal & Breakfast" = cereal, oatmeal, pancake mix, breakfast bars, granola. "Other" = pantry staples, canned goods, condiments, sauces, frozen meals, spices, supplements, baby food, international foods, anything that doesn't clearly fit above. "Household" = ONLY for non-food, non-drinkable items (cleaning supplies, paper goods, personal care, pet supplies, batteries).
+  RULES: "Produce" = ALL fresh fruits and vegetables — strawberries, raspberries, blueberries, apples, bananas, oranges, spinach, broccoli, carrots, avocado, lettuce, tomatoes, etc. "Meat & Seafood" = raw or cooked meat, poultry, seafood. "Dairy & Eggs" = milk, cheese, yogurt, butter, eggs, cream. "Bread & Bakery" = bread, tortillas, rolls, bagels, pastries, cakes, pies, cookies. "Deli" = deli meats, prepared hot bar items, rotisserie chicken, deli sides. "Beverages" = drinkable liquids: juice, soda (the drink), water, beer, wine, spirits, energy drinks, coffee, tea. CRITICAL: "baking soda" is NOT a beverage — it is "Other". "Snacks & Candy" = chips, crackers, nuts, candy, granola bars, popcorn, pretzels. "Cereal & Breakfast" = cereal, oatmeal, pancake mix, breakfast bars, granola. "Other" = pantry staples (baking soda, flour, sugar, oil, vinegar, spices), canned goods, condiments, sauces, frozen meals, supplements, baby food, international foods, anything that doesn't clearly fit above. "Household" = ONLY for non-food, non-drinkable items (cleaning supplies, paper goods, personal care, diapers, pet supplies, batteries).
+  TRICKY CASES: "Arm & Hammer Baking Soda" = Other (pantry, not a drink). "Organic Strawberries" = Produce. "Organic Raspberries" = Produce. "Pull-Ups Training Pants" = Household. "Signature Diapers" = Household. "Liv Sugar Free Soda" = Beverages (it IS a drink).
 - photo_query: the single best Unsplash search query to find an accurate product photo. This must be a 2-5 word phrase that describes what the item LOOKS LIKE as a physical object on a white or clean background. RULES:
   - Use the generic food name, NOT the brand name ("sliced white bread" not "Wonder Bread")
   - Be specific enough to get the right photo ("raw chicken breast" not "chicken", "shredded cheddar cheese" not "cheese")
@@ -6733,9 +6734,19 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     key = dedupe_key(name)
     img_url = PRODUCT_IMAGE_MAP.get(key)
 
-    # ── PERSISTENT CACHE CHECK ─────────────────────────────────────────────────
-    # Check persistent disk cache first — same photo every time, no API call needed
-    if not img_url:
+    # ── PERSISTENT CACHE CHECK ────────────────────────────────────────────
+    # Skip persistent cache if this item has a hardcoded Unsplash override or
+    # a Gemini photo_query. A cached wrong photo (oranges for diapers, 7UP for
+    # Pull-Ups) will never be fixed otherwise. Overrides always produce better photos.
+    _name_lower_ck = name.lower()
+    _simplified_ck = _simplify_for_unsplash(name).lower()
+    _has_override = (
+        bool(photo_query)
+        or _simplified_ck in _UNSPLASH_QUERY_OVERRIDES
+        or _name_lower_ck in _UNSPLASH_QUERY_OVERRIDES
+        or any(k in _simplified_ck or k in _name_lower_ck for k in _UNSPLASH_QUERY_OVERRIDES)
+    )
+    if not img_url and not _has_override:
         cached = _get_persistent_image(name)
         if cached:
             print(f"[PERSISTENT CACHE] hit for '{name}': {cached}", flush=True)
@@ -6760,25 +6771,23 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     # Turns "Ck Sl Cookie" -> "Chocolate Slice Cookie" before searching
     name = await _expand_receipt_name(name)
 
-    # ── STEP 1: Unsplash with Gemini photo_query (BEST PHOTOS — run first when available) ──
-    # Gemini picked the exact right search term for this item.
-    # A targeted query like "raw chicken breast white background" beats anything
-    # Spoonacular or Kroger would guess, so we run this first when we have it.
+    # ── STEP 1: Unsplash with Gemini photo_query (HIGHEST PRIORITY when available) ──
+    # Gemini picked the exact right search term. For household items especially,
+    # this avoids Spoonacular/Kroger/Edamam returning completely wrong food photos.
     if not img_url and photo_query:
         try:
             img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
             if img_url:
-                print(f"[UNSPLASH GEMINI FIRST] '{name}' -> got photo from Gemini query", flush=True)
+                print(f"[UNSPLASH GEMINI FIRST] '{name}' -> photo from Gemini query", flush=True)
         except Exception as e:
             print(f"[UNSPLASH GEMINI FIRST] error for '{name}': {e}", flush=True)
 
     # ── STEP 2: Parallel fallback — Spoonacular + Kroger + Edamam simultaneously ──
-    # Only runs if Gemini query missed or no photo_query was provided.
-    # All three fire at the same time instead of waiting one by one.
-    if not img_url:
+    # HOUSEHOLD ITEMS SKIP THIS ENTIRELY. Spoonacular and Kroger are food databases
+    # and will return food photos for household items (diapers -> oranges,
+    # Pull-Ups -> 7UP). Household items go straight to Unsplash.
+    if not img_url and not is_household:
         async def _safe_spoonacular() -> Optional[str]:
-            if is_household:
-                return None
             try:
                 return await _spoonacular_image(name)
             except Exception as e:
@@ -6797,8 +6806,6 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
                 return None
 
         async def _safe_edamam() -> Optional[str]:
-            if is_household:
-                return None
             try:
                 return await _edamam_food_image(name)
             except Exception as e:
@@ -6810,13 +6817,12 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
             _safe_kroger(),
             _safe_edamam(),
         )
-        # Priority: Spoonacular (clean ingredient shots) > Kroger (branded) > Edamam
         img_url = spoon_url or kroger_url or edamam_url
         if img_url:
             source = "spoonacular" if spoon_url else ("kroger" if kroger_url else "edamam")
             print(f"[PARALLEL IMAGE] '{name}' -> {source}", flush=True)
 
-    # ── Kroger retry with stripped brand name ──────────────────────────────
+    # ── Kroger retry with stripped brand name (if parallel pass missed) ────────
     if not img_url and stripped_name:
         print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
         try:
@@ -6833,12 +6839,10 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception:
             pass
 
-    # ── STEP 3: Unsplash without Gemini query (override dict + smart suffix) ──────
-    # This runs when Gemini didn't provide a photo_query or all above missed.
-    # Still uses the 673-entry override dict and smart suffix logic.
+    # ── STEP 3: Unsplash (uses Gemini photo_query if provided) ───────────────
     if not img_url:
         try:
-            img_url = await _unsplash_image(name, is_household=is_household)
+            img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
         except Exception as e:
             print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
 
