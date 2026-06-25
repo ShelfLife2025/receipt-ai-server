@@ -6749,8 +6749,8 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
                 subject = name
 
         illustration_prompt = (
-            f"Colorful flat vector illustration of {subject}, "
-            f"clean white background, bold vibrant colors, simple friendly shapes, "
+            f"Flat vector illustration of {subject}, "
+            f"clean white background, realistic product colors, simple friendly shapes, "
             f"modern grocery app icon style, no text, no labels, no shadows, centered"
         )
         print(f"[GEMINI ICON] generating for '{name}': {illustration_prompt}", flush=True)
