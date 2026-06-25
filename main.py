@@ -6716,20 +6716,16 @@ async def _kroger_image(name: str) -> Optional[str]:
 
 async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional[bytes]:
     """
-    Ask Gemini to generate a colorful flat illustration icon for the given item.
+    Generate a colorful flat illustration icon for a grocery item.
+    Uses Gemini REST API directly (httpx) — no SDK image generation needed.
     Returns raw PNG bytes, or None on failure.
-    Steps:
-      1. Ask Gemini text to build a precise illustration prompt from the item name.
-      2. Call Gemini image generation with that prompt.
     """
     try:
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
             return None
 
-        # ── Step 1: Build the illustration prompt ────────────────────────────
-        # Use photo_query if Gemini already told us what the item looks like.
-        # Otherwise ask Gemini text to describe the physical object.
+        # ── Step 1: Build subject description ────────────────────────────────
         if photo_query and len(photo_query.strip()) > 3:
             subject = photo_query.strip()
         else:
@@ -6739,9 +6735,9 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
                 f'Describe in 3-6 words exactly what physical object to draw.\n'
                 f'Rules:\n'
                 f'- Be specific about the form: "paper towel roll", "cat litter jug", "raw chicken breast", "pasta shells box"\n'
-                f'- Never say "plate of" or "bowl of" or "dish of" — always the raw product or package\n'
+                f'- Never say "plate of" or "bowl of" or "dish of" — always the raw product or its package\n'
                 f'- For produce: "fresh [item]" e.g. "fresh strawberries", "bunch of bananas"\n'
-                f'- For packaged goods: include the container type e.g. "sour cream container", "orange juice carton"\n'
+                f'- For packaged goods: include container type e.g. "sour cream container", "orange juice carton"\n'
                 f'Return ONLY the 3-6 word description, nothing else.'
             )
             resp = await asyncio.wait_for(
@@ -6752,7 +6748,6 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
             if not subject:
                 subject = name
 
-        # ── Step 2: Generate the illustration ────────────────────────────────
         illustration_prompt = (
             f"Colorful flat vector illustration of {subject}, "
             f"clean white background, bold vibrant colors, simple friendly shapes, "
@@ -6760,26 +6755,33 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
         )
         print(f"[GEMINI ICON] generating for '{name}': {illustration_prompt}", flush=True)
 
-        img_model = genai.GenerativeModel("gemini-2.0-flash-preview-image-generation")
-        img_resp = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: img_model.generate_content(
-                    illustration_prompt,
-                    generation_config=genai.types.GenerationConfig(response_modalities=["IMAGE"])
-                )
-            ),
-            timeout=20.0
+        # ── Step 2: Call Gemini image generation via REST API ────────────────
+        # Uses httpx directly — works with any SDK version installed.
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.0-flash-preview-image-generation:generateContent?key={api_key}"
         )
+        payload = {
+            "contents": [{"parts": [{"text": illustration_prompt}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"]}
+        }
+        async with httpx.AsyncClient(timeout=25.0) as hc:
+            r = await hc.post(url, json=payload)
+            if r.status_code != 200:
+                print(f"[GEMINI ICON] HTTP {r.status_code} for '{name}': {r.text[:200]}", flush=True)
+                return None
+            data = r.json()
 
-        # Extract image bytes from response
-        for part in (img_resp.candidates[0].content.parts if img_resp.candidates else []):
-            if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
-                png_bytes = part.inline_data.data
-                print(f"[GEMINI ICON] ✅ generated {len(png_bytes)} bytes for '{name}'", flush=True)
-                return png_bytes
+        # Extract base64 image from response
+        for candidate in data.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline and inline.get("data"):
+                    png_bytes = base64.b64decode(inline["data"])
+                    print(f"[GEMINI ICON] ✅ generated {len(png_bytes)} bytes for '{name}'", flush=True)
+                    return png_bytes
 
-        print(f"[GEMINI ICON] no image in response for '{name}'", flush=True)
+        print(f"[GEMINI ICON] no image in response for '{name}': {str(data)[:200]}", flush=True)
         return None
 
     except asyncio.TimeoutError:
