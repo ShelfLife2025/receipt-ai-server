@@ -6714,6 +6714,82 @@ async def _kroger_image(name: str) -> Optional[str]:
     return None
 
 
+async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional[bytes]:
+    """
+    Ask Gemini to generate a colorful flat illustration icon for the given item.
+    Returns raw PNG bytes, or None on failure.
+    Steps:
+      1. Ask Gemini text to build a precise illustration prompt from the item name.
+      2. Call Gemini image generation with that prompt.
+    """
+    try:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return None
+
+        # ── Step 1: Build the illustration prompt ────────────────────────────
+        # Use photo_query if Gemini already told us what the item looks like.
+        # Otherwise ask Gemini text to describe the physical object.
+        if photo_query and len(photo_query.strip()) > 3:
+            subject = photo_query.strip()
+        else:
+            text_model = genai.GenerativeModel("gemini-2.5-flash")
+            describe_prompt = (
+                f'A grocery item named "{name}" needs a product illustration for a mobile app.\n'
+                f'Describe in 3-6 words exactly what physical object to draw.\n'
+                f'Rules:\n'
+                f'- Be specific about the form: "paper towel roll", "cat litter jug", "raw chicken breast", "pasta shells box"\n'
+                f'- Never say "plate of" or "bowl of" or "dish of" — always the raw product or package\n'
+                f'- For produce: "fresh [item]" e.g. "fresh strawberries", "bunch of bananas"\n'
+                f'- For packaged goods: include the container type e.g. "sour cream container", "orange juice carton"\n'
+                f'Return ONLY the 3-6 word description, nothing else.'
+            )
+            resp = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, text_model.generate_content, describe_prompt),
+                timeout=4.0
+            )
+            subject = resp.text.strip().strip('"').strip("'")
+            if not subject:
+                subject = name
+
+        # ── Step 2: Generate the illustration ────────────────────────────────
+        illustration_prompt = (
+            f"Colorful flat vector illustration of {subject}, "
+            f"clean white background, bold vibrant colors, simple friendly shapes, "
+            f"modern grocery app icon style, no text, no labels, no shadows, centered"
+        )
+        print(f"[GEMINI ICON] generating for '{name}': {illustration_prompt}", flush=True)
+
+        img_model = genai.GenerativeModel("gemini-2.0-flash-preview-image-generation")
+        img_resp = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: img_model.generate_content(
+                    illustration_prompt,
+                    generation_config=genai.types.GenerationConfig(response_modalities=["IMAGE"])
+                )
+            ),
+            timeout=20.0
+        )
+
+        # Extract image bytes from response
+        for part in (img_resp.candidates[0].content.parts if img_resp.candidates else []):
+            if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                png_bytes = part.inline_data.data
+                print(f"[GEMINI ICON] ✅ generated {len(png_bytes)} bytes for '{name}'", flush=True)
+                return png_bytes
+
+        print(f"[GEMINI ICON] no image in response for '{name}'", flush=True)
+        return None
+
+    except asyncio.TimeoutError:
+        print(f"[GEMINI ICON] timeout for '{name}'", flush=True)
+        return None
+    except Exception as e:
+        print(f"[GEMINI ICON] error for '{name}': {e}", flush=True)
+        return None
+
+
 @app.get("/image")
 async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(None), product_id: Optional[str] = Query(None), category: Optional[str] = Query(None), photo_query: Optional[str] = Query(None)):
     ck = _cache_key(name, upc, product_id)
@@ -6721,182 +6797,47 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     if ck in _IMAGE_CACHE and ck in _IMAGE_CONTENT_TYPE_CACHE:
         return Response(content=_IMAGE_CACHE[ck], media_type=_IMAGE_CONTENT_TYPE_CACHE[ck])
 
-    if PACKSHOT_SERVICE_URL:
-        qp: List[str] = []
-        if product_id:
-            qp.append(f"product_id={urllib.parse.quote(product_id.strip())}")
-        if upc:
-            qp.append(f"upc={urllib.parse.quote(upc.strip())}")
-        if name:
-            qp.append(f"name={urllib.parse.quote(name.strip())}")
-
-        url = f"{PACKSHOT_SERVICE_URL}/image"
-        if qp:
-            url += "?" + "&".join(qp)
-
-        headers = {"User-Agent": "ShelfLife/1.0"}
-        if PACKSHOT_SERVICE_KEY:
-            headers["Authorization"] = f"Bearer {PACKSHOT_SERVICE_KEY}"
-
-        result = await fetch_image(url, headers=headers)
-        if result:
-            img_bytes, ctype = result
-            _IMAGE_CACHE[ck] = img_bytes
-            _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
-            _trim_caches_if_needed()
-            return Response(content=img_bytes, media_type=ctype)
-
-    key = dedupe_key(name)
-    img_url = PRODUCT_IMAGE_MAP.get(key)
-
-    # ── PERSISTENT CACHE CHECK ────────────────────────────────────────────
-    # Skip persistent cache if this item has a hardcoded Unsplash override or
-    # a Gemini photo_query. A cached wrong photo (oranges for diapers, 7UP for
-    # Pull-Ups) will never be fixed otherwise. Overrides always produce better photos.
-    _name_lower_ck = name.lower()
-    _simplified_ck = _simplify_for_unsplash(name).lower()
-    _has_override = (
-        bool(photo_query)
-        or _simplified_ck in _UNSPLASH_QUERY_OVERRIDES
-        or _name_lower_ck in _UNSPLASH_QUERY_OVERRIDES
-        or any(k in _simplified_ck or k in _name_lower_ck for k in _UNSPLASH_QUERY_OVERRIDES)
-    )
-    if not img_url and not _has_override:
-        cached = _get_persistent_image(name)
-        if cached:
-            print(f"[PERSISTENT CACHE] hit for '{name}': {cached}", flush=True)
-            img_url = cached
-
-    # Helper: strip store brand prefix for retry attempts
-    store_brands = ["publix ", "kroger ", "walmart ", "target ", "great value ",
-                    "good & gather ", "market pantry ", "simple truth ",
-                    "signature select ", "member's mark ", "kirkland ", "store brand "]
-    stripped_name: Optional[str] = None
-    name_lower = name.lower()
-    for brand in store_brands:
-        if name_lower.startswith(brand):
-            candidate_stripped = name[len(brand):].strip()
-            if candidate_stripped:
-                stripped_name = candidate_stripped
-            break
-
-    is_household = (category or "").lower() == "household" or _is_household_item(name)
-
-    # ── EXPAND NAME WITH GEMINI BEFORE IMAGE SEARCH ──────────────
-    # Turns "Ck Sl Cookie" -> "Chocolate Slice Cookie" before searching
-    name = await _expand_receipt_name(name)
-
-    # ── STEP 1: Unsplash with Gemini photo_query (HIGHEST PRIORITY when available) ──
-    # Gemini picked the exact right search term. For household items especially,
-    # this avoids Spoonacular/Kroger/Edamam returning completely wrong food photos.
-    if not img_url and photo_query:
-        try:
-            img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
-            if img_url:
-                print(f"[UNSPLASH GEMINI FIRST] '{name}' -> photo from Gemini query", flush=True)
-        except Exception as e:
-            print(f"[UNSPLASH GEMINI FIRST] error for '{name}': {e}", flush=True)
-
-    # ── STEP 2: Parallel fallback — Spoonacular + Kroger + Edamam simultaneously ──
-    # HOUSEHOLD ITEMS SKIP THIS ENTIRELY. Spoonacular and Kroger are food databases
-    # and will return food photos for household items (diapers -> oranges,
-    # Pull-Ups -> 7UP). Household items go straight to Unsplash.
-    if not img_url and not is_household:
-        async def _safe_spoonacular() -> Optional[str]:
+    # ── STEP 1: PERSISTENT CACHE ─────────────────────────────────────────────
+    # Generated icons are stored as data:image/png;base64,... strings.
+    # Once an icon is generated it lasts forever — instant on all future scans.
+    cached_val = _get_persistent_image(name)
+    if cached_val:
+        if cached_val.startswith("data:image/"):
+            # It's a stored base64 icon — decode and return directly
             try:
-                return await _spoonacular_image(name)
-            except Exception as e:
-                print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
-                return None
-
-        async def _safe_kroger() -> Optional[str]:
-            try:
-                result = await _kroger_image(name)
-                if result and not _is_good_product_image(result):
-                    print(f"[KROGER] rejected bad image for '{name}': {result}", flush=True)
-                    return None
-                return result
-            except Exception as e:
-                print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
-                return None
-
-        async def _safe_edamam() -> Optional[str]:
-            try:
-                return await _edamam_food_image(name)
-            except Exception as e:
-                print(f"[EDAMAM FOOD IMAGE] error for '{name}': {e}", flush=True)
-                return None
-
-        spoon_url, kroger_url, edamam_url = await asyncio.gather(
-            _safe_spoonacular(),
-            _safe_kroger(),
-            _safe_edamam(),
-        )
-        img_url = spoon_url or kroger_url or edamam_url
-        if img_url:
-            source = "spoonacular" if spoon_url else ("kroger" if kroger_url else "edamam")
-            print(f"[PARALLEL IMAGE] '{name}' -> {source}", flush=True)
-
-    # ── Kroger retry with stripped brand name (if parallel pass missed) ────────
-    if not img_url and stripped_name:
-        print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
-        try:
-            img_url = await _kroger_image(stripped_name)
-            if img_url and not _is_good_product_image(img_url):
-                img_url = None
-        except Exception:
-            pass
-
-    # ── Edamam retry with stripped brand name ──────────────────────────────
-    if not img_url and not is_household and stripped_name:
-        try:
-            img_url = await _edamam_food_image(stripped_name)
-        except Exception:
-            pass
-
-    # ── STEP 3: Unsplash (uses Gemini photo_query if provided) ───────────────
-    if not img_url:
-        try:
-            img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
-        except Exception as e:
-            print(f"[UNSPLASH IMAGE] error for '{name}': {e}", flush=True)
-
-    # ── STEP 4: Freepik (dead last resort) ──────────────────────────────
-    if not img_url:
-        try:
-            img_url = await _freepik_image(name)
-        except Exception as e:
-            print(f"[FREEPIK IMAGE] error for '{name}': {e}", flush=True)
-
-    if not img_url and stripped_name:
-        try:
-            img_url = await _freepik_image(stripped_name)
-        except Exception:
-            pass
-
-    if not img_url:
-        img_url = FALLBACK_PRODUCT_IMAGE
-
-    # ── SAVE TO PERSISTENT CACHE ──────────────────────────────────────────
-    # Only save if this is a real item photo (not the generic fallback)
-    if img_url and img_url != FALLBACK_PRODUCT_IMAGE and not _get_persistent_image(name):
-        _set_persistent_image(name, img_url)
-        print(f"[PERSISTENT CACHE] saved '{name}' -> {img_url}", flush=True)
-
-    try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as iclient:
-            r = await iclient.get(img_url)
-            r.raise_for_status()
-            ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip().lower()
-            if ctype.startswith("image/"):
-                img_bytes = r.content
+                header, b64data = cached_val.split(",", 1)
+                ctype = header.split(":")[1].split(";")[0]
+                img_bytes = base64.b64decode(b64data)
                 _IMAGE_CACHE[ck] = img_bytes
                 _IMAGE_CONTENT_TYPE_CACHE[ck] = ctype
                 _trim_caches_if_needed()
+                print(f"[ICON CACHE] hit for '{name}'", flush=True)
                 return Response(content=img_bytes, media_type=ctype)
-    except Exception as e:
-        print(f"[IMAGE FETCH] error fetching '{img_url}': {e}", flush=True)
+            except Exception as e:
+                print(f"[ICON CACHE] decode error for '{name}': {e}", flush=True)
+        else:
+            # Legacy URL entry — ignore it, regenerate with icon pipeline
+            print(f"[ICON CACHE] legacy URL for '{name}', regenerating as icon", flush=True)
 
+    # ── STEP 2: GENERATE ICON WITH GEMINI ────────────────────────────────────
+    # Gemini generates a colorful flat illustration for the exact item.
+    # On first scan this takes ~5 seconds. After that it's cached forever.
+    icon_bytes = await _gemini_icon(name, photo_query=photo_query)
+    if icon_bytes:
+        # Store as base64 data URL in persistent cache — lasts forever
+        b64 = base64.b64encode(icon_bytes).decode("utf-8")
+        data_url = f"data:image/png;base64,{b64}"
+        _set_persistent_image(name, data_url)
+        _IMAGE_CACHE[ck] = icon_bytes
+        _IMAGE_CONTENT_TYPE_CACHE[ck] = "image/png"
+        _trim_caches_if_needed()
+        print(f"[GEMINI ICON] cached new icon for '{name}'", flush=True)
+        return Response(content=icon_bytes, media_type="image/png")
+
+    # ── STEP 3: FALLBACK ──────────────────────────────────────────────────────
+    # Gemini failed (timeout, API error). Return a tiny transparent placeholder.
+    # This will NOT be cached so next scan tries Gemini again.
+    print(f"[IMAGE] Gemini icon failed for '{name}', returning placeholder", flush=True)
     tiny_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
     )
