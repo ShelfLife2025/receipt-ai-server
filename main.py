@@ -6726,9 +6726,31 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
             return None
 
         # ── Step 1: Build subject description ────────────────────────────────
-        if photo_query and len(photo_query.strip()) > 3:
+        # Keyword overrides — these win over photo_query and Gemini description
+        _SUBJECT_OVERRIDES = [
+            # (keyword_in_name_lowercase, forced_subject)
+            ("cottonelle",         "white Cottonelle toilet paper rolls stacked"),
+            ("toilet paper",       "white toilet paper rolls stacked"),
+            ("clorox",             "white cylindrical Clorox disinfecting wipes container"),
+            ("disinfecting wipes", "white cylindrical disinfecting wipes container"),
+            ("parmesan",           "wedge of parmesan cheese"),
+            ("parm",               "wedge of parmesan cheese"),
+            ("half-and-half",      "half and half dairy carton"),
+            ("half and half",      "half and half dairy carton"),
+            ("sour cream",         "sour cream plastic container with lid"),
+            ("ice cream",          "round ice cream carton tub"),
+        ]
+        name_lower = name.lower()
+        subject = None
+        for keyword, forced in _SUBJECT_OVERRIDES:
+            if keyword in name_lower:
+                subject = forced
+                break
+
+        if subject is None and photo_query and len(photo_query.strip()) > 3:
             subject = photo_query.strip()
-        else:
+
+        if subject is None:
             text_model = genai.GenerativeModel("gemini-2.5-flash")
             describe_prompt = (
                 f'A grocery item named "{name}" needs a product illustration for a mobile app.\n'
