@@ -1490,6 +1490,9 @@ _JUNK_EXACT_LINES = {
     "digital coupon", "fuel points", "gas points",
     # Whole Foods / Trader Joe's
     "team member",
+    # Price promotion lines (e.g. "2 for", "3 for", "2 for 5", "buy 2 get 1")
+    "2 for", "3 for", "4 for", "5 for", "2 for 1", "buy 2", "buy 3",
+    "mix match", "mix and match", "mix & match",
 }
 
 STOP_ITEM_WORDS = {"lb", "lbs", "oz", "g", "kg", "ct", "ea", "each", "w", "wt", "weight", "at", "x", "vov"}
@@ -3190,6 +3193,11 @@ def _is_junk_line(s: str) -> bool:
     if len(toks) >= 2 and all(len(t) <= 2 and t.isalpha() for t in toks):
         if not any(t in {"oz", "lb", "ct", "ea", "gf", "og"} for t in toks):
             return True
+
+    # Price promotion lines: "2 for $5", "3 for 10.00", "2 for 6", etc.
+    raw = s.strip().lower()
+    if re.match(r'^\d+\s+for\b', raw):
+        return True
 
     return False
 
@@ -6296,14 +6304,18 @@ async def _unsplash_image(name: str, is_household: bool = False, photo_query: Op
 
         # ── STEP 3: Run searches in priority order ──────────────────────────────
 
+        # Household items must skip the food photo check entirely —
+        # paper towels, cat litter, dish soap have no food keywords in their Unsplash tags.
+        food_check = not is_household
+
         # Priority 1: Override query (hand-crafted, no suffix added — it's already complete)
         if override_query:
-            img_url = await _search(override_query, append_suffix=False)
+            img_url = await _search(override_query, append_suffix=False, require_food_check=food_check)
             if img_url:
                 return img_url
 
         # Priority 2: Simplified name + suffix
-        img_url = await _search(simplified)
+        img_url = await _search(simplified, require_food_check=food_check)
         if img_url:
             return img_url
 
@@ -6311,17 +6323,17 @@ async def _unsplash_image(name: str, is_household: bool = False, photo_query: Op
         words = simplified.split()
         if len(words) > 2:
             short = " ".join(words[-2:])
-            img_url = await _search(short)
+            img_url = await _search(short, require_food_check=food_check)
             if img_url:
                 return img_url
 
         # Priority 4: First meaningful word + suffix
         if words:
-            img_url = await _search(words[0])
+            img_url = await _search(words[0], require_food_check=food_check)
             if img_url:
                 return img_url
 
-        # Priority 5: Generic fallback, skip food check
+        # Priority 5: Generic fallback, skip food check always
         img_url = await _search(fallback_query, append_suffix=False, require_food_check=False)
         return img_url
 
