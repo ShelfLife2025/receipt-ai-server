@@ -6772,8 +6772,8 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
     name = await _expand_receipt_name(name)
 
     # ── STEP 1: Unsplash with Gemini photo_query (HIGHEST PRIORITY when available) ──
-    # Gemini picked the exact right search term — this is our best, most reliable
-    # signal for "a generic, representative, clean photo of this item."
+    # Gemini picked the exact right search term. For household items especially,
+    # this avoids Spoonacular/Kroger/Edamam returning completely wrong food photos.
     if not img_url and photo_query:
         try:
             img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
@@ -6782,31 +6782,64 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
         except Exception as e:
             print(f"[UNSPLASH GEMINI FIRST] error for '{name}': {e}", flush=True)
 
-    # ── STEP 2: Google Image Search (primary fallback) ──────────────────────
-    # Replaces the old Spoonacular/Kroger/Edamam race. Those three were grocery/
-    # ingredient databases optimized for exact-product or exact-ingredient
-    # matching, which made them the most likely source of a WRONG-product photo
-    # (e.g. diapers -> oranges) rather than just a mediocre one. Google Image
-    # Search with a scoped CX returns generic, recognizable product-style photos,
-    # which is what we actually want ("doesn't need to be a brand match, just a
-    # photo of what the item is").
-    if not img_url:
-        try:
-            img_url = await _google_product_image(name)
-            if img_url:
-                print(f"[GOOGLE IMAGE PRIMARY] '{name}' -> found", flush=True)
-        except Exception as e:
-            print(f"[GOOGLE IMAGE PRIMARY] error for '{name}': {e}", flush=True)
+    # ── STEP 2: Parallel fallback — Spoonacular + Kroger + Edamam simultaneously ──
+    # HOUSEHOLD ITEMS SKIP THIS ENTIRELY. Spoonacular and Kroger are food databases
+    # and will return food photos for household items (diapers -> oranges,
+    # Pull-Ups -> 7UP). Household items go straight to Unsplash.
+    if not img_url and not is_household:
+        async def _safe_spoonacular() -> Optional[str]:
+            try:
+                return await _spoonacular_image(name)
+            except Exception as e:
+                print(f"[SPOONACULAR IMAGE] error for '{name}': {e}", flush=True)
+                return None
 
-    # ── Google Image retry with stripped brand name ─────────────────────────
+        async def _safe_kroger() -> Optional[str]:
+            try:
+                result = await _kroger_image(name)
+                if result and not _is_good_product_image(result):
+                    print(f"[KROGER] rejected bad image for '{name}': {result}", flush=True)
+                    return None
+                return result
+            except Exception as e:
+                print(f"[KROGER IMAGE] error for '{name}': {e}", flush=True)
+                return None
+
+        async def _safe_edamam() -> Optional[str]:
+            try:
+                return await _edamam_food_image(name)
+            except Exception as e:
+                print(f"[EDAMAM FOOD IMAGE] error for '{name}': {e}", flush=True)
+                return None
+
+        spoon_url, kroger_url, edamam_url = await asyncio.gather(
+            _safe_spoonacular(),
+            _safe_kroger(),
+            _safe_edamam(),
+        )
+        img_url = spoon_url or kroger_url or edamam_url
+        if img_url:
+            source = "spoonacular" if spoon_url else ("kroger" if kroger_url else "edamam")
+            print(f"[PARALLEL IMAGE] '{name}' -> {source}", flush=True)
+
+    # ── Kroger retry with stripped brand name (if parallel pass missed) ────────
     if not img_url and stripped_name:
-        print(f"[GOOGLE IMAGE BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
+        print(f"[KROGER BRAND STRIP] retrying without brand: '{stripped_name}'", flush=True)
         try:
-            img_url = await _google_product_image(stripped_name)
+            img_url = await _kroger_image(stripped_name)
+            if img_url and not _is_good_product_image(img_url):
+                img_url = None
         except Exception:
             pass
 
-    # ── STEP 3: Unsplash (generic search, uses Gemini photo_query if provided) ──
+    # ── Edamam retry with stripped brand name ──────────────────────────────
+    if not img_url and not is_household and stripped_name:
+        try:
+            img_url = await _edamam_food_image(stripped_name)
+        except Exception:
+            pass
+
+    # ── STEP 3: Unsplash (uses Gemini photo_query if provided) ───────────────
     if not img_url:
         try:
             img_url = await _unsplash_image(name, is_household=is_household, photo_query=photo_query)
@@ -6878,47 +6911,6 @@ async def admin_clear_image_cache(key: Optional[str] = Query(None)):
         print(f"[CACHE CLEAR] failed to delete cache file: {e}", flush=True)
     print("[CACHE CLEAR] All image caches cleared by admin.", flush=True)
     return {"status": "ok", "message": "All image caches cleared. Next requests will fetch fresh photos."}
-
-
-@app.post("/admin/clear-image-cache-for-item")
-async def admin_clear_image_cache_for_item(
-    name: str = Query(...),
-    upc: Optional[str] = Query(None),
-    product_id: Optional[str] = Query(None),
-    key: Optional[str] = Query(None),
-):
-    """
-    Clears the cached photo for ONE item only (by name), without touching
-    every other cached photo. Use this when you spot a single wrong/bad
-    photo instead of nuking the entire cache with /admin/clear-image-cache.
-    """
-    _require_admin(key)
-
-    removed_persistent = False
-    name_key = name.lower().strip()
-    if name_key in _PERSISTENT_IMAGE_URL_CACHE:
-        _PERSISTENT_IMAGE_URL_CACHE.pop(name_key, None)
-        _save_persistent_image_cache()
-        removed_persistent = True
-
-    ck = _cache_key(name, upc, product_id)
-    removed_in_memory = False
-    if ck in _IMAGE_CACHE:
-        _IMAGE_CACHE.pop(ck, None)
-        removed_in_memory = True
-    if ck in _IMAGE_CONTENT_TYPE_CACHE:
-        _IMAGE_CONTENT_TYPE_CACHE.pop(ck, None)
-        removed_in_memory = True
-
-    print(f"[CACHE CLEAR ITEM] '{name}' persistent={removed_persistent} in_memory={removed_in_memory}", flush=True)
-
-    return {
-        "status": "ok",
-        "name": name,
-        "removed_persistent_entry": removed_persistent,
-        "removed_in_memory_entry": removed_in_memory,
-        "message": "This item's cached photo was cleared. Next request for it will fetch a fresh photo.",
-    }
 
 
 @app.get("/admin/learned-map")
