@@ -6764,7 +6764,7 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
             )
             resp = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(None, text_model.generate_content, describe_prompt),
-                timeout=4.0
+                timeout=10.0
             )
             subject = resp.text.strip().strip('"').strip("'")
             if not subject:
@@ -6860,14 +6860,11 @@ async def get_product_image(name: str = Query(...), upc: Optional[str] = Query(N
 
     # ── STEP 3: FALLBACK ──────────────────────────────────────────────────────
     # Gemini failed (timeout, API error). Return a tiny transparent placeholder.
-    # This will NOT be cached so next scan tries Gemini again.
-    print(f"[IMAGE] Gemini icon failed for '{name}', returning placeholder", flush=True)
+    # Do NOT cache this — so the next request will try Gemini again.
+    print(f"[IMAGE] Gemini icon failed for '{name}', returning placeholder (not cached)", flush=True)
     tiny_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
     )
-    _IMAGE_CACHE[ck] = tiny_bytes
-    _IMAGE_CONTENT_TYPE_CACHE[ck] = "image/png"
-    _trim_caches_if_needed()
     return Response(content=tiny_bytes, media_type="image/png")
 def _require_admin(key: Optional[str]) -> None:
     if not ADMIN_KEY:
