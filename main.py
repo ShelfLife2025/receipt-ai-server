@@ -4697,6 +4697,38 @@ async def parse_receipt(
                 # Include photo_query in image URL so the /image endpoint uses Gemini's exact query
                 it["image_url"] = _image_url_for_item(base_url, gemini_name, it.get("category"), it.get("photo_query"))
 
+    # ── PRE-WARM IMAGE CACHE ───────────────────────────────────────────────────
+    # Fire off Gemini icon generation for every item in parallel right now.
+    # The app will call /image shortly after — by then most icons are ready.
+    async def _prewarm_icons(items_snapshot: list) -> None:
+        async def _generate_one(name: str, photo_query: str) -> None:
+            try:
+                # Skip if already cached
+                cached = _get_persistent_image(name)
+                if cached and cached.startswith("data:"):
+                    return
+                icon_bytes = await _gemini_icon(name, photo_query=photo_query)
+                if icon_bytes:
+                    b64 = base64.b64encode(icon_bytes).decode("utf-8")
+                    data_url = f"data:image/png;base64,{b64}"
+                    _set_persistent_image(name, data_url)
+                    print(f"[PREWARM] cached icon for '{name}'", flush=True)
+            except Exception as e:
+                print(f"[PREWARM] failed for '{name}': {e}", flush=True)
+
+        tasks = [
+            _generate_one(
+                it.get("name", ""),
+                it.get("photo_query") or it.get("name", "")
+            )
+            for it in items_snapshot
+            if it.get("name")
+        ]
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    await _prewarm_icons(list(items))
+
     return items
 
 
