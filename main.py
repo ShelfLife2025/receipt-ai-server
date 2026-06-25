@@ -650,12 +650,14 @@ If the name is already clean, return it as-is. CRITICAL: Each input row is exact
   Non-food items: "Household"
   RULES: "Produce" = ALL fresh fruits and vegetables — strawberries, raspberries, blueberries, apples, bananas, oranges, spinach, broccoli, carrots, avocado, lettuce, tomatoes, etc. "Meat & Seafood" = raw or cooked meat, poultry, seafood. "Dairy & Eggs" = milk, cheese, yogurt, butter, eggs, cream. "Bread & Bakery" = bread, tortillas, rolls, bagels, pastries, cakes, pies, cookies. "Deli" = deli meats, prepared hot bar items, rotisserie chicken, deli sides. "Beverages" = drinkable liquids: juice, soda (the drink), water, beer, wine, spirits, energy drinks, coffee, tea. CRITICAL: "baking soda" is NOT a beverage — it is "Other". "Snacks & Candy" = chips, crackers, nuts, candy, granola bars, popcorn, pretzels. "Cereal & Breakfast" = cereal, oatmeal, pancake mix, breakfast bars, granola. "Other" = pantry staples (baking soda, flour, sugar, oil, vinegar, spices), canned goods, condiments, sauces, frozen meals, supplements, baby food, international foods, anything that doesn't clearly fit above. "Household" = ONLY for non-food, non-drinkable items (cleaning supplies, paper goods, personal care, diapers, pet supplies, batteries).
   TRICKY CASES: "Arm & Hammer Baking Soda" = Other (pantry, not a drink). "Organic Strawberries" = Produce. "Organic Raspberries" = Produce. "Pull-Ups Training Pants" = Household. "Signature Diapers" = Household. "Liv Sugar Free Soda" = Beverages (it IS a drink).
-- photo_query: the single best Unsplash search query to find an accurate product photo. This must be a 2-5 word phrase that describes what the item LOOKS LIKE as a physical object on a white or clean background. RULES:
+- photo_query: the single best Unsplash search query to find a professional product photo. This must be a 2-5 word phrase describing the PHYSICAL OBJECT as it would appear in a grocery store. RULES:
   - Use the generic food name, NOT the brand name ("sliced white bread" not "Wonder Bread")
-  - Be specific enough to get the right photo ("raw chicken breast" not "chicken", "shredded cheddar cheese" not "cheese")
-  - For household items, describe the product container/object ("liquid laundry detergent bottle", "paper towel roll", "deodorant stick")
-  - Always end with "white background" for clean product-style shots
-  - EXAMPLES: "fresh strawberries white background", "raw chicken breast white background", "shredded cheddar cheese white background", "baby spinach bag white background", "greek yogurt cup white background", "tide laundry detergent bottle white background", "kirkland diapers bag white background", "orange juice carton white background"
+  - Be specific about the FORM of the product ("sour cream container" not "sour cream", "pasta shells box" not "pasta", "chicken breast package" not "chicken")
+  - Always describe the CONTAINER or PHYSICAL FORM: box, bag, container, carton, bottle, jar, can, package, bunch, roll
+  - For household items: describe the product object ("laundry detergent bottle", "paper towel roll", "deodorant stick")
+  - For produce: describe fresh raw form ("fresh strawberries", "bunch of bananas", "raw broccoli florets")
+  - NEVER describe a plated dish, cooked meal, or bowl of food — always the uncooked product or its package
+  - EXAMPLES: "sour cream container dairy", "pasta shells box grocery", "raw chicken breast package", "shredded cheddar cheese bag", "greek yogurt cup", "baby spinach bag", "orange juice carton", "fresh strawberries", "laundry detergent bottle", "diapers package", "paper towel roll", "baking soda box"
 
 ════════════════════════════════════════
 CATEGORY RULES
@@ -6233,8 +6235,9 @@ async def _unsplash_image(name: str, is_household: bool = False, photo_query: Op
                         break
 
 
-        # Gemini returned an exact query for this item — use it when we have no override
-        if photo_query and not override_query:
+        # Gemini returned an exact query for this item — ALWAYS use it, even if override dict matched.
+        # Gemini knows the exact item from the receipt; the override dict is a best guess.
+        if photo_query:
             override_query = photo_query
             print(f"[UNSPLASH GEMINI QUERY] '{name}' using Gemini photo_query: '{photo_query}'", flush=True)
 
