@@ -6778,6 +6778,9 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
             ("half and half",      "half and half dairy carton"),
             ("sour cream",         "sour cream plastic container with lid"),
             ("ice cream",          "round ice cream carton tub"),
+            ("wild rice",          "bowl of wild rice"),
+            ("brown rice",         "bowl of cooked brown rice"),
+            ("rice",               "bowl of cooked white rice"),
         ]
         name_lower = name.lower()
         subject = None
@@ -7062,13 +7065,15 @@ Only return the JSON array. No markdown, no explanation, no code blocks."""
                 if not isinstance(parsed, list):
                     continue
 
-                # Build suggestions — Edamam recipe image first, then Unsplash with food hint
+                # Build suggestions — Gemini generates cartoon illustration of finished dish
                 async def fetch_photo(title: str) -> Optional[str]:
-                    photo = await _edamam_recipe_image(title)
-                    if not photo:
-                        # Append "food dish" so Unsplash returns a plated meal, not random
-                        photo = await _unsplash_image(title + " food dish")
-                    return photo
+                    icon_bytes = await _gemini_icon(
+                        title,
+                        photo_query=f"cartoon illustration of {title} plated dish"
+                    )
+                    if icon_bytes:
+                        return "data:image/png;base64," + base64.b64encode(icon_bytes).decode("utf-8")
+                    return None
 
                 photo_tasks = [fetch_photo(item.get("title", "")) for item in parsed]
                 photos = await asyncio.gather(*photo_tasks)
@@ -7169,12 +7174,15 @@ Only return the JSON object. No markdown, no explanation, no code blocks."""
                 raw = raw.strip()
                 parsed = json.loads(raw)
 
-                # Fetch photo from Edamam first, fall back to Unsplash with food hint
+                # Fetch cartoon illustration of the finished dish via Gemini
                 photo_url = None
                 try:
-                    photo_url = await _edamam_recipe_image(req.title)
-                    if not photo_url:
-                        photo_url = await _unsplash_image(req.title + " food dish")
+                    icon_bytes = await _gemini_icon(
+                        req.title,
+                        photo_query=f"cartoon illustration of {req.title} plated dish"
+                    )
+                    if icon_bytes:
+                        photo_url = "data:image/png;base64," + base64.b64encode(icon_bytes).decode("utf-8")
                 except Exception:
                     pass
 
