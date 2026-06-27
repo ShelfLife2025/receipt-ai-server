@@ -4734,7 +4734,7 @@ async def parse_receipt(
         if tasks:
             await asyncio.gather(*tasks)
 
-    await _prewarm_icons(list(items))
+    asyncio.create_task(_prewarm_icons(list(items)))
 
     return items
 
