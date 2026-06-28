@@ -663,8 +663,8 @@ If the name is already clean, return it as-is. CRITICAL: Each input row is exact
 CATEGORY RULES
 ════════════════════════════════════════
 HOUSEHOLD — not edible, not drinkable:
-  Paper: Bounty, Charmin, Scott, Kleenex, paper towels, toilet paper, napkins, tissues, paper plates
-  Cleaning: Tide, Gain, Downy, Bounce, Lysol, Febreze, Dawn, Cascade, Windex, Clorox, Swiffer, Fabuloso, Mr. Clean, bleach, dish soap, laundry detergent, dryer sheets, fabric softener, sponges, scrub brushes, Pine-Sol, Comet, Bona, Seventh Generation cleaner
+  Paper: Bounty, Charmin, Scott, Kleenex, Cottonelle, Puffs, paper towels, toilet paper, bath tissue, napkins, tissues, paper plates
+  Cleaning: Tide, Gain, Downy, Bounce, Lysol, Febreze, Dawn, Cascade, Windex, Clorox, Clorox Scentiva, Swiffer, Fabuloso, Mr. Clean, bleach, dish soap, laundry detergent, dryer sheets, fabric softener, sponges, scrub brushes, Pine-Sol, Comet, Bona, Seventh Generation cleaner, disinfecting wipes, cleaning wipes, spray cleaner
   Personal care: Cremo, Old Spice, Dove, Pantene, Head & Shoulders, Axe, Degree, Secret, Gillette, shampoo, conditioner, body wash, deodorant, toothpaste, toothbrush, floss, mouthwash, razors, shaving cream, lotion, soap bars, face wash, moisturizer, sunscreen, nail polish, makeup
   Pet: Fresh Step, Tidy Cats, Arm & Hammer litter, cat litter, dog food, cat food, pet treats, flea treatment, puppy pads
   Misc: trash bags, garbage bags, aluminum foil, plastic wrap, Ziploc bags, batteries, light bulbs, matches, cotton balls, cotton swabs, first aid items, bandages
@@ -1507,6 +1507,13 @@ HOUSEHOLD_WORDS = {
     "toothbrush", "mouthwash", "cleaning", "laundry", "sponge", "sponges",
     "tide", "febreze", "lysol", "cascade", "downy", "bounce", "gain",
     "cremo", "barber", "bergamot", "extreme", "odor", "renewal", "freshstep",
+    # Additional household brands and keywords
+    "cottonelle", "charmin", "bounty", "scott", "kleenex", "puffs",
+    "scentiva", "fabuloso", "pinesol", "pine-sol", "seventh", "generation",
+    "softener", "dryer", "swiffer", "disinfect", "sanitizer", "sanitize",
+    "bandage", "band-aid", "lotion", "sunscreen", "moisturizer",
+    "pantene", "gillette", "axe", "degree", "secret", "dove", "olay",
+    "litter", "dogfood", "catfood", "purina", "pedigree", "iams",
 }
 
 NOISE_PATTERNS = [
