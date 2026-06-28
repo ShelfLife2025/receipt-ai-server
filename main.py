@@ -561,9 +561,55 @@ def _fallback_for_item(name: str, storage: Optional[str] = None) -> Dict:
         "shelf_life_by_storage": {"fridge": 14, "freezer": None, "pantry": None}
     }
 
+# ---------------------------------------------------------------------------
+# GUARANTEED HOUSEHOLD BRANDS — substring check, case-insensitive.
+# Any item whose name contains one of these strings is ALWAYS Household.
+# Checked before Gemini AND after Gemini so nothing can slip through.
+# ---------------------------------------------------------------------------
+GUARANTEED_HOUSEHOLD_BRANDS: list[str] = [
+    "cottonelle", "charmin", "bounty", "scott towel", "kleenex", "puffs",
+    "clorox", "scentiva", "lysol", "fabuloso", "pine-sol", "pinesol",
+    "windex", "mr clean", "scrubbing bubbles", "comet", "ajax",
+    "tide pods", "tide original", "tide free", "tide plus", "tide with",
+    "gain flings", "gain original", "gain detergent",
+    "downy", "dreft", "persil", "all detergent",
+    "bounce sheet", "dryer sheet", "fabric softener",
+    "febreze", "glade", "air wick",
+    "swiffer", "bona floor",
+    "dawn dish", "cascade dish", "cascade platinum",
+    "pampers", "huggies", "pull-ups", "luvs diaper",
+    "always pad", "tampax", "always thin",
+    "gillette razor", "gillette shave", "venus razor", "schick razor",
+    "colgate toothpaste", "crest toothpaste", "oral-b", "listerine",
+    "dove soap", "dove body wash", "irish spring", "softsoap",
+    "degree deodorant", "secret deodorant", "old spice deodorant",
+    "pantene", "head and shoulders", "herbal essences",
+    "olay", "neutrogena", "cetaphil", "aveeno lotion",
+    "band-aid", "neosporin", "bengay",
+    "purina", "pedigree", "iams", "blue buffalo", "fancy feast",
+    "tidy cats", "fresh step cat", "arm and hammer litter",
+    "hefty bag", "glad bag", "glad trash", "ziploc",
+    "reynolds wrap", "glad press",
+    "energizer battery", "duracell battery",
+]
+
+def _is_guaranteed_household(name: str) -> bool:
+    """Substring check — if the lowercased name contains any guaranteed
+    household brand string, the item is Household. No token splitting so
+    receipt abbreviations and partial names are still caught."""
+    n = name.lower()
+    return any(brand in n for brand in GUARANTEED_HOUSEHOLD_BRANDS)
+
 async def enrich_items_with_ai(items: List[Dict]) -> List[Dict]:
     if not items:
         return []
+
+    # Early brand gate: force Household BEFORE Gemini even sees the item.
+    # This catches receipt abbreviations like "CTN ULTCOMFORTCARE" where
+    # "cottonelle" is in GUARANTEED_HOUSEHOLD_BRANDS as a substring match.
+    for item in items:
+        if _is_guaranteed_household(item.get("name", "")):
+            item["category"] = "Household"
 
     results: List[Optional[Dict]] = [None] * len(items)
     uncached_indices: List[int] = []
@@ -1179,9 +1225,14 @@ Respond with ONLY a valid JSON array, no markdown."""
                     # Clorox Scentiva, etc.) as Food. The HOUSEHOLD_WORDS token set is
                     # the ground truth — if ANY token in the item name is a household word,
                     # force it to Household regardless of what Gemini said.
-                    _name_tokens = set(re.sub(r"[^a-z0-9 ]", " ", final_name_for_classify.lower()).split())
-                    if _name_tokens & HOUSEHOLD_WORDS:
+                    # Layer 1: guaranteed brand substring check (catches abbreviations)
+                    if _is_guaranteed_household(final_name_for_classify) or _is_guaranteed_household(item.get("name", "")):
                         our_category = "Household"
+                    else:
+                        # Layer 2: token-set check against HOUSEHOLD_WORDS
+                        _name_tokens = set(re.sub(r"[^a-z0-9 ]", " ", final_name_for_classify.lower()).split())
+                        if _name_tokens & HOUSEHOLD_WORDS:
+                            our_category = "Household"
 
                     # New: food_category (display subcategory) and photo_query from Gemini
                     valid_food_categories = {
