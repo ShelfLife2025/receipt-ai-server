@@ -1174,6 +1174,14 @@ Respond with ONLY a valid JSON array, no markdown."""
                     # Fall back to keyword classifier only if Gemini returned something invalid
                     gemini_category = (result.get("category") or "").strip()
                     our_category = gemini_category if gemini_category in ("Food", "Household") else _classify(final_name_for_classify)
+                    # Post-Gemini override: keyword check ALWAYS wins over Gemini.
+                    # Gemini sometimes misclassifies household brands (Cottonelle, Bounty,
+                    # Clorox Scentiva, etc.) as Food. The HOUSEHOLD_WORDS token set is
+                    # the ground truth — if ANY token in the item name is a household word,
+                    # force it to Household regardless of what Gemini said.
+                    _name_tokens = set(re.sub(r"[^a-z0-9 ]", " ", final_name_for_classify.lower()).split())
+                    if _name_tokens & HOUSEHOLD_WORDS:
+                        our_category = "Household"
 
                     # New: food_category (display subcategory) and photo_query from Gemini
                     valid_food_categories = {
