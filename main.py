@@ -6823,11 +6823,11 @@ async def _gemini_icon(name: str, photo_query: Optional[str] = None) -> Optional
         # Uses httpx directly — works with any SDK version installed.
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-3.1-flash-image:generateContent?key={api_key}"
+            f"gemini-2.0-flash-preview-image-generation:generateContent?key={api_key}"
         )
         payload = {
             "contents": [{"parts": [{"text": illustration_prompt}]}],
-            "generationConfig": {"responseModalities": ["IMAGE"]}
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}
         }
         async with httpx.AsyncClient(timeout=45.0) as hc:
             r = await hc.post(url, json=payload)
